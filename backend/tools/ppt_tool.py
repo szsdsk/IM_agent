@@ -18,6 +18,11 @@ class PPTTool(BaseTool):
         )
         os.makedirs(self._output_dir, exist_ok=True)
 
+    def _download_url(self, filepath: str) -> str:
+        """把本地 PPT 文件路径转换成浏览器可访问的下载地址。"""
+        filename = os.path.basename(filepath)
+        return f"/api/files/slides/{filename}"
+
     async def execute(
         self,
         action: str,
@@ -56,7 +61,8 @@ class PPTTool(BaseTool):
                 "task_id": task_id,
                 "title": title or "Presentation",
                 "slides_count": len(slides) if slides else 5,
-                "file_path": f"{self._output_dir}/mock_{int(time.time() * 1000)}.pptx"
+                "file_path": None,
+                "download_url": None,
             },
             "update_slide": {
                 "success": True,
@@ -176,7 +182,8 @@ class PPTTool(BaseTool):
                 "task_id": task_id,
                 "title": title or "Presentation",
                 "slides_count": len(slides),
-                "file_path": filepath
+                "file_path": filepath,
+                "download_url": self._download_url(filepath),
             }
 
         except ImportError:
@@ -211,7 +218,8 @@ class PPTTool(BaseTool):
                     "task_id": task_id,
                     "title": deck.title,
                     "slides_count": len(deck.slides),
-                    "file_path": result["filepath"]
+                    "file_path": result["filepath"],
+                    "download_url": self._download_url(result["filepath"]),
                 }
             return result
 

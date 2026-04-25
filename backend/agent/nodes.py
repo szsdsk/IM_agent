@@ -20,6 +20,63 @@ from backend.services.llm_service import (
 logger = logging.getLogger(__name__)
 
 
+def _normalize_module(module: Any) -> str:
+    """把模型返回的模块名统一成后端内部模块名。"""
+    value = str(module or "").strip().upper()
+    aliases = {
+        "PPT": "DECK",
+        "SLIDE": "DECK",
+        "SLIDES": "DECK",
+        "POWERPOINT": "DECK",
+        "PRESENTATION": "DECK",
+        "DOCUMENT": "DOC",
+        "DOCUMENTS": "DOC",
+        "DOCS": "DOC",
+    }
+    return aliases.get(value, value)
+
+
+def _workflow_modules(state: AgentState) -> set[str]:
+    """获取当前工作流中已经规划出的模块集合。"""
+    return {_normalize_module(step.get("module")) for step in state.get("steps", [])}
+
+
+def _content_types_need_deck(state: AgentState) -> bool:
+    """判断用户意图或内容类型是否明确需要生成 PPT。"""
+    content_types = {str(item).strip().lower() for item in state.get("content_types", [])}
+    intent = str(state.get("intent", "")).lower()
+    deck_markers = {"ppt", "slide", "slides", "deck", "presentation", "powerpoint"}
+    return bool(content_types & deck_markers) or any(marker in intent for marker in deck_markers)
+
+
+def _normalize_slide_for_frontend(slide: Dict[str, Any], index: int) -> Dict[str, Any]:
+    """把幻灯片内容整理成前端预览和 PPT 渲染都能消费的结构。"""
+    content = slide.get("content", "")
+    bullets = slide.get("bullets") or []
+
+    if isinstance(content, dict):
+        text_parts = []
+        for value in content.values():
+            if isinstance(value, list):
+                text_parts.extend(str(item) for item in value)
+            elif value is not None:
+                text_parts.append(str(value))
+        content = "\n".join(text_parts)
+    elif isinstance(content, list):
+        content = "\n".join(str(item) for item in content)
+
+    if not content and bullets:
+        content = "\n".join(str(item) for item in bullets)
+
+    return {
+        **slide,
+        "index": slide.get("index", index),
+        "title": slide.get("title", f"第 {index + 1} 页"),
+        "content": content or "",
+        "bullets": bullets,
+    }
+
+
 def _touch(state: AgentState, step: str, progress: float | None = None) -> None:
     """更新状态"""
     state["current_step"] = step
@@ -110,6 +167,15 @@ async def plan_workflow(state: AgentState) -> AgentState:
         if plan:
             state["workflow_plan"] = plan
             state["steps"] = plan.get("steps", [])
+            for step in state["steps"]:
+                step["module"] = _normalize_module(step.get("module"))
+
+            if _content_types_need_deck(state) and "DECK" not in _workflow_modules(state):
+                state["steps"].append({
+                    "module": "DECK",
+                    "action": "generate_slides",
+                    "needs_approval": False,
+                })
 
             plan_text = "📋 **执行计划**\n\n"
             for i, step in enumerate(state["steps"]):
@@ -148,7 +214,7 @@ async def extract_tasks(state: AgentState) -> AgentState:
     _touch(state, "extract_tasks", 0.3)
 
     tasks = []
-    modules = set(step.get("module") for step in state.get("steps", []))
+    modules = _workflow_modules(state)
 
     for module in modules:
         if module == "DOC":
@@ -219,7 +285,7 @@ async def generate_canvas(state: AgentState) -> AgentState:
     """生成画布/白板"""
     _touch(state, "generate_canvas", 0.6)
 
-    modules = set(step.get("module") for step in state.get("steps", []))
+    modules = _workflow_modules(state)
     if "CANVAS" not in modules:
         return state
 
@@ -235,8 +301,8 @@ async def generate_slides(state: AgentState) -> AgentState:
     _touch(state, "generate_slides", 0.7)
     logger.info(f"Task {state['task_id']}: generating slides")
 
-    modules = set(step.get("module") for step in state.get("steps", []))
-    if "DECK" not in modules:
+    modules = _workflow_modules(state)
+    if "DECK" not in modules and not _content_types_need_deck(state):
         return state
 
     _append_message(state, "assistant", "📊 正在生成演示稿...", "generate_slides")
@@ -253,7 +319,11 @@ async def generate_slides(state: AgentState) -> AgentState:
         state["deck_spec"] = deck_spec
 
         ppt_tool = ToolFactory.get_tool("PPTTool")
-        slides = deck_spec.get("slides", [])
+        raw_slides = deck_spec.get("slides", [])
+        slides = [
+            _normalize_slide_for_frontend(slide, index)
+            for index, slide in enumerate(raw_slides)
+        ]
 
         result = await ppt_tool.execute(
             action="create_slides",
@@ -267,7 +337,7 @@ async def generate_slides(state: AgentState) -> AgentState:
                 "slide_id": result.get("slide_id"),
                 "title": deck_spec.get("title"),
                 "slides": slides,
-                "file_path": result.get("file_path"),
+                "file_path": result.get("download_url") or result.get("file_path"),
             }
             state["slide_id"] = result.get("slide_id")
 
@@ -318,19 +388,25 @@ async def deliver_result(state: AgentState) -> AgentState:
     }
 
     if state.get("doc_content"):
-        delivery["document"] = {
+        doc_payload = {
             "title": state["doc_content"].get("title"),
             "doc_id": state["doc_content"].get("doc_id"),
+            "content": state["doc_content"].get("content"),
             "preview": state["doc_content"].get("content_preview"),
         }
+        delivery["document"] = doc_payload
+        delivery["doc"] = doc_payload
 
     if state.get("slides_content"):
-        delivery["slides"] = {
+        slides_payload = {
             "title": state["slides_content"].get("title"),
             "slide_id": state["slides_content"].get("slide_id"),
+            "slides": state["slides_content"].get("slides", []),
             "slides_count": len(state["slides_content"].get("slides", [])),
             "file_path": state["slides_content"].get("file_path"),
         }
+        delivery["slides"] = slides_payload
+        delivery["deck"] = slides_payload
 
     if state.get("canvas_content"):
         delivery["canvas"] = {"canvas_id": state["canvas_content"].get("canvas_id")}

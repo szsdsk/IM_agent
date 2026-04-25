@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Set
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -199,6 +201,26 @@ async def get_slides(slide_id: str, db: AsyncSession = Depends(get_db)):
     if not slides:
         raise HTTPException(status_code=404, detail="Slides not found")
     return slides
+
+
+@router.get("/files/slides/{filename}")
+async def download_slide_file(filename: str):
+    """下载后端生成的 PPT 文件。"""
+    if Path(filename).name != filename:
+        raise HTTPException(status_code=400, detail="Invalid file name")
+
+    slides_dir = Path(__file__).resolve().parents[1] / "data" / "slides"
+    file_path = (slides_dir / filename).resolve()
+
+    # 只允许访问 slides 输出目录，避免通过文件名跳出目录。
+    if slides_dir.resolve() not in file_path.parents or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Slide file not found")
+
+    return FileResponse(
+        path=file_path,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=filename,
+    )
 
 
 @router.websocket("/ws/sessions/{session_id}")

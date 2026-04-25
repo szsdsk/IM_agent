@@ -3,8 +3,10 @@ node_modules/
 .trae/
 data/
 
+temp/
+
 # Python
-__pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
