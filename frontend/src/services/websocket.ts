@@ -89,21 +89,24 @@ class WebSocketService {
       case 'task.completed':
         store.setStatus('completed')
         store.setProgress(1)
-        if (data.result?.doc) {
+        const resultDoc = data.result?.doc || data.result?.document
+        const resultSlides = data.result?.slides || data.result?.deck
+
+        if (resultDoc) {
           store.setDoc({
-            id: data.result.doc.doc_id || data.task_id || `doc-${Date.now()}`,
+            id: resultDoc.doc_id || data.task_id || `doc-${Date.now()}`,
             task_id: data.task_id || '',
-            content: data.result.doc.content || '',
+            content: resultDoc.content || resultDoc.preview || '',
             version: 1,
             created_at: data.timestamp,
           })
         }
-        if (data.result?.slides) {
+        if (resultSlides) {
           store.setSlides({
-            id: data.result.slides.slide_id || data.task_id || `slide-${Date.now()}`,
+            id: resultSlides.slide_id || data.task_id || `slide-${Date.now()}`,
             task_id: data.task_id || '',
-            slides_json: data.result.slides.slides || [],
-            file_path: data.result.slides.file_path || null,
+            slides_json: resultSlides.slides || [],
+            file_path: resultSlides.file_path || null,
             created_at: data.timestamp,
           })
         }

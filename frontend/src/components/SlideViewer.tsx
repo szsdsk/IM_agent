@@ -6,7 +6,31 @@ interface SlideViewerProps {
 
 interface SlideItem {
   title?: string
-  content?: string
+  content?: unknown
+  bullets?: string[]
+}
+
+function getSlideText(slide: SlideItem): string {
+  // 兼容模型返回的字符串、数组、对象和 bullets，统一转成可预览文本。
+  if (typeof slide.content === 'string') return slide.content
+  if (Array.isArray(slide.content)) return slide.content.map(String).join('\n')
+  if (slide.content && typeof slide.content === 'object') {
+    return Object.values(slide.content)
+      .flatMap((value) => (Array.isArray(value) ? value : [value]))
+      .filter((value) => value !== null && value !== undefined)
+      .map(String)
+      .join('\n')
+  }
+  return slide.bullets?.join('\n') || ''
+}
+
+function getDownloadHref(filePath: string): string {
+  // 后端旧结果可能返回本地磁盘路径，这里转换成浏览器可访问的下载接口。
+  if (filePath.includes('\\') || /^[a-zA-Z]:/.test(filePath)) {
+    const filename = filePath.split(/[\\/]/).pop()
+    return filename ? `/api/files/slides/${encodeURIComponent(filename)}` : filePath
+  }
+  return filePath
 }
 
 export default function SlideViewer({ className = '' }: SlideViewerProps) {
@@ -34,7 +58,7 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
         </div>
         {slides.file_path && (
           <a
-            href={slides.file_path}
+            href={getDownloadHref(slides.file_path)}
             target="_blank"
             rel="noopener noreferrer"
             className="px-3 py-1 text-sm bg-primary-500 text-white rounded hover:bg-primary-600 transition-colors"
@@ -54,8 +78,8 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
               >
                 <div className="text-xs text-gray-500 mb-2">第 {index + 1} 页</div>
                 {slide.title && <h4 className="font-medium text-gray-800 mb-2">{slide.title}</h4>}
-                {slide.content && (
-                  <p className="text-sm text-gray-600 whitespace-pre-wrap">{slide.content}</p>
+                {getSlideText(slide) && (
+                  <p className="text-sm text-gray-600 whitespace-pre-wrap">{getSlideText(slide)}</p>
                 )}
               </div>
             ))}
