@@ -1,4 +1,7 @@
+import { useEffect, useState } from 'react'
+import { api } from '../services/api'
 import { useSessionStore } from '../store/useSessionStore'
+import type { LarkCliStatus, LarkSyncResponse } from '../types'
 
 interface SlideViewerProps {
   className?: string
@@ -34,7 +37,61 @@ function getDownloadHref(filePath: string): string {
 }
 
 export default function SlideViewer({ className = '' }: SlideViewerProps) {
-  const { slides } = useSessionStore()
+  const { slides, task } = useSessionStore()
+  const [larkStatus, setLarkStatus] = useState<LarkCliStatus | null>(null)
+  const [syncResult, setSyncResult] = useState<LarkSyncResponse | null>(null)
+  const [syncing, setSyncing] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    // 组件加载时读取一次后端健康检查，避免每次渲染都请求 CLI 状态。
+    api.healthCheck()
+      .then((health) => {
+        if (!cancelled) setLarkStatus(health.lark_cli ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setLarkStatus(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 把后端的 CLI 状态转换成按钮禁用原因，用户悬停时能知道缺哪一步配置。
+  const syncDisabledReason = !larkStatus?.enabled
+    ? '飞书 CLI 同步未开启，请在后端配置 LARK_CLI_ENABLED=true'
+    : !larkStatus.available
+      ? `未找到 ${larkStatus.bin || 'lark-cli'}，请先安装飞书 CLI`
+      : !larkStatus.authenticated
+        ? '飞书 CLI 尚未登录，请先执行 lark-cli auth login --recommend'
+        : !task?.id
+          ? '当前任务信息还未准备好'
+          : ''
+
+  const canSyncToLark = Boolean(slides && task?.id && !syncDisabledReason)
+
+  const handleSyncToLark = async () => {
+    if (!task?.id || syncing) return
+
+    // 同步动作只影响飞书交付，不改变本地 PPT 预览和下载结果。
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const result = await api.syncArtifactToLark(task.id)
+      setSyncResult(result)
+    } catch (error) {
+      setSyncResult({
+        success: false,
+        provider: 'lark_cli',
+        artifact_id: task.id,
+        error: error instanceof Error ? error.message : '同步到飞书失败',
+      })
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   if (!slides) {
     return (
@@ -57,16 +114,53 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
           <p className="text-xs text-gray-500 mt-1">共 {slidesData.length} 页</p>
         </div>
         {slides.file_path && (
-          <a
-            href={getDownloadHref(slides.file_path)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3 py-1 text-sm bg-primary-500 text-white rounded hover:bg-primary-600 transition-colors"
-          >
-            下载
-          </a>
+          <div className="flex items-center gap-2">
+            {/* 下载仍然走本地后端文件接口，保证即使飞书未配置也能交付 PPT。 */}
+            <a
+              href={getDownloadHref(slides.file_path)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1 text-sm bg-primary-500 text-white rounded hover:bg-primary-600 transition-colors"
+            >
+              下载
+            </a>
+            {/* 飞书按钮根据 health 返回的 CLI 状态启用或置灰。 */}
+            <button
+              type="button"
+              onClick={handleSyncToLark}
+              disabled={!canSyncToLark || syncing}
+              title={syncDisabledReason || '同步到飞书'}
+              className={`px-3 py-1 text-sm rounded transition-colors ${
+                canSyncToLark && !syncing
+                  ? 'bg-green-600 text-white hover:bg-green-700'
+                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+              }`}
+            >
+              {syncing ? '同步中...' : '同步到飞书'}
+            </button>
+          </div>
         )}
       </div>
+
+      {syncResult && (
+        <div
+          className={`mx-4 mt-3 rounded border px-3 py-2 text-sm ${
+            syncResult.success ? 'border-green-200 bg-green-50 text-green-700' : 'border-amber-200 bg-amber-50 text-amber-700'
+          }`}
+        >
+          <span>{syncResult.message || syncResult.error || '飞书同步已返回结果'}</span>
+          {syncResult.lark_url && (
+            <a
+              className="ml-2 underline"
+              href={syncResult.lark_url}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              打开飞书链接
+            </a>
+          )}
+        </div>
+      )}
 
       <div className="p-6 overflow-y-auto max-h-[600px]">
         {slidesData.length > 0 ? (

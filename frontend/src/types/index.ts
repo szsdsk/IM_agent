@@ -35,6 +35,43 @@ export interface Slide {
   created_at: string
 }
 
+export interface LarkCliStatus {
+  // 后端是否允许真实调用飞书 CLI。
+  enabled: boolean
+  // 当前机器是否能找到 lark-cli 可执行文件。
+  available: boolean
+  // 当前 lark-cli 是否已经完成登录授权。
+  authenticated: boolean
+  // 后端实际使用的 CLI 命令或路径。
+  bin: string
+  // CLI 调用身份，例如 user。
+  as_identity: string
+  message?: string
+  error?: string
+}
+
+export interface Health {
+  status: string
+  timestamp: string
+  version: string
+  // 飞书状态是附加能力，旧后端不返回时前端也能兼容。
+  lark_cli?: LarkCliStatus
+}
+
+export interface LarkSyncResponse {
+  success: boolean
+  // 当前只实现 lark_cli，保留字段方便未来扩展其他同步通道。
+  provider: 'lark_cli'
+  artifact_id: string
+  artifact_type?: string
+  // 同步成功后用于在前端打开飞书资源。
+  lark_url?: string | null
+  lark_token?: string | null
+  message?: string | null
+  error?: string | null
+  details?: Record<string, any> | null
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
