@@ -1,250 +1,212 @@
 # Agent-Pilot
 
-Agent-Pilot 是一个面向办公协同场景的智能 Agent Demo。项目提供内置聊天入口，用户输入需求后，后端 Agent 会完成意图分析、流程规划、文档生成、PPT 生成、预览下载，并可选将交付物同步到飞书云空间。
+基于 IM 的办公协同智能助手。把群聊里的需求一句话或一段对话，自动转化为**文档（PRD）+ 演示稿（PPT）+ 流程图/画布**，并以**交付卡片**回投到 IM。
 
-当前项目重点服务比赛/演示闭环：先保证本地生成、预览、下载稳定，再通过 `lark-cli` 扩展飞书同步能力。
+> 当前为 MVP 基线版本：后端工作流已端到端跑通（意图分析 → 规划 → 文档生成 → PPT 生成 → 交付）。
 
-## Features
+---
 
-- 内置 Web 聊天界面，支持通过自然语言提交办公任务。
-- 后端基于 FastAPI 提供任务、文档、PPT、下载与飞书同步接口。
-- Agent 流程包含输入接收、需求分析、流程规划、任务提取、文档生成、PPT 生成和交付。
-- PPT 会落盘为 `.pptx`，前端支持预览和下载。
-- 飞书集成基于官方 `@larksuite/cli`，支持将文档或 PPT 同步到飞书。
-- 默认本地 Demo 不依赖飞书授权；开启 `LARK_CLI_ENABLED=true` 后才走真实飞书同步。
+## 核心能力
 
-## Tech Stack
+| 模块 | 能力 |
+|---|---|
+| **意图理解** | LLM 解析用户输入，识别内容类型（doc/slides/canvas/summary）、目标受众、约束条件 |
+| **任务规划** | 自动拆解为有序子任务，关键节点支持人工确认（`needs_approval`） |
+| **文档生成** | PRD 模板（背景/目标/需求详情/里程碑/风险），Markdown 输出，可对接 AFFiNE |
+| **PPT 生成** | DeckSpec 中间格式 → Slidev Markdown / `python-pptx` PPTX / PDF |
+| **画布生成** | 流程图、架构图（AFFiNE Canvas） |
+| **排练材料** | 每页讲稿、预计时间、Q&A 预测、提示要点 |
+| **多端同步** | Redis Pub/Sub + WebSocket（含内存模式 fallback） |
+| **交付归档** | 结构化 DeliveryCard（Markdown + Rocket.Chat 卡片格式），JSON 文件落盘 |
 
-- Backend: Python 3.11, FastAPI, SQLAlchemy, SQLite, LangGraph, python-pptx
-- Frontend: React 18, TypeScript, Vite, Tailwind CSS, Zustand
-- LLM Provider: OpenAI-compatible Chat Completions API
-- Lark Integration: `@larksuite/cli`
+---
 
-## Project Structure
+## 架构
 
-```text
-.
-|-- backend/                 # FastAPI 后端、Agent 编排、工具层和数据库模型
-|   |-- agent/               # Agent 状态流转与节点逻辑
-|   |-- api/                 # HTTP / WebSocket 接口
-|   |-- database/            # SQLAlchemy 连接与模型
-|   |-- .env.example         # 后端环境变量模板
-|   |-- services/            # LLM、PPT 渲染、交付等服务
-|   |-- tools/               # Doc / PPT / Lark 等工具封装
-|   `-- tests/               # 后端单测
-|-- frontend/                # React 前端
-|   `-- src/
-|-- docs/                    # 额外配置文档
-|-- temp/                    # 临时文档和本地开发产物，默认不提交
-`-- requirements.txt         # 后端依赖入口
+```
+┌──────────────────────────────────────────────────────┐
+│                     Frontend                         │
+│           (AgentPanel / DeliveryCard)                │
+└──────────────────────┬───────────────────────────────┘
+                       │ HTTP / WebSocket
+┌──────────────────────▼───────────────────────────────┐
+│              FastAPI Backend (main.py)               │
+│  ┌─────────────────────────────────────────────────┐ │
+│  │           Agent Orchestrator                    │ │
+│  │  receive → parse → plan → extract → doc        │ │
+│  │      → canvas → slides → confirm → deliver     │ │
+│  └─────────────────────────────────────────────────┘ │
+└──┬─────────┬────────┬─────────┬────────┬─────────┬───┘
+   │         │        │         │        │         │
+┌──▼──┐  ┌───▼──┐  ┌──▼───┐  ┌──▼──┐  ┌──▼───┐  ┌──▼──┐
+│ LLM │  │Rocket│  │AFFiNE│  │Deck │  │Sync  │  │Deliv│
+│Mini │  │.Chat │  │ Doc/ │  │Spec/│  │Redis/│  │ery  │
+│ Max │  │      │  │Canvas│  │Rendr│  │ WS   │  │Card │
+└─────┘  └──────┘  └──────┘  └─────┘  └──────┘  └─────┘
 ```
 
-## Prerequisites
+---
 
-- Python 3.11
-- Node.js 18+
-- npm
-- Conda 可选，但推荐用独立环境运行后端
-- 可用的 OpenAI-compatible LLM API Key
-- 可选：飞书 CLI，用于同步到飞书
+## 工作流状态机
 
-## Quick Start
-
-### 1. Clone and enter project
-
-```powershell
-cd D:\IM_agent
+```
+created → planning → waiting_approval → generating_doc
+                                        ↓
+                     archived ← delivered ← reviewing ← generating_deck
 ```
 
-### 2. Configure environment variables
+每个节点产出 emoji 化的进度消息（`📋 需求分析完成`、`📄 文档已生成`、`📊 演示稿已生成` 等）。
 
-复制环境变量模板：
+---
 
-```powershell
-Copy-Item backend\.env.example backend\.env
+## 快速开始
+
+### 1. 依赖
+
+```bash
+pip install -r requirements.txt
 ```
 
-然后编辑 `backend\.env`，至少配置：
+主要依赖：`fastapi`、`uvicorn`、`httpx`、`pydantic`、`python-pptx`、`sqlalchemy`、`aiosqlite`、`redis`。
+
+### 2. 配置
+
+复制 `backend/.env.example` 为 `backend/.env`（或直接编辑 `backend/.env`）：
 
 ```env
-OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-LLM_MODEL=gpt-4o-mini
+OPENAI_API_KEY=<your-minimax-key>
+OPENAI_BASE_URL=https://api.minimaxi.com/v1
+LLM_MODEL=abab6.5s-chat
+
+# 可选 - 真实集成（不填则走 mock）
+ROCKET_CHAT_URL=https://your-rocketchat-instance
+ROCKET_CHAT_USER=pilot-bot
+ROCKET_CHAT_PASSWORD=...
+AFFINE_URL=https://your-affine-instance
+AFFINE_TOKEN=...
+
+DEBUG=true
+MOCK_MODE=true
 ```
 
-如果暂时不测试飞书，同步配置保持关闭即可：
+### 3. 启动
 
-```env
-LARK_CLI_ENABLED=false
+```bash
+cd IM_agent
+python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-完整配置说明见 [backend/.env.example](./backend/.env.example)。
+服务启动后访问：
+- API 根：`http://localhost:8000/`
+- API 文档：`http://localhost:8000/docs`
+- WebSocket：`ws://localhost:8000/api/ws/sessions/{session_id}`
 
-### 3. Install backend dependencies
+### 4. 端到端调用
 
-推荐使用 Conda 环境，例如：
+```bash
+# 创建 session
+SESSION_ID=$(curl -s -X POST http://localhost:8000/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"alice"}' | jq -r .id)
 
-```powershell
-conda create -n IM_agent python=3.11
-conda activate IM_agent
-python -m pip install -r backend\requirements.txt
+# 发送需求
+curl -X POST "http://localhost:8000/api/sessions/$SESSION_ID/messages" \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"帮我写一份关于AI Agent的产品需求文档，目标受众是管理层"}'
 ```
 
-如果你已经有可用的 `IM_agent` 环境，只需要激活后安装依赖即可。
+---
 
-### 4. Run backend
+## 目录结构
 
-请在项目根目录启动后端，不要进入 `backend` 子目录启动：
-
-```powershell
-cd D:\IM_agent
-python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+IM_agent/
+├── backend/
+│   ├── main.py                    # FastAPI 入口
+│   ├── config.py                  # 配置加载（含 MiniMax 适配）
+│   ├── .env                       # 本地配置（gitignored）
+│   ├── agent/
+│   │   ├── orchestrator.py        # 工作流编排
+│   │   ├── nodes.py               # 9 个节点（接入 LLM）
+│   │   └── state.py               # AgentState 类型
+│   ├── api/
+│   │   ├── endpoints.py           # REST + WebSocket
+│   │   └── schemas.py             # Pydantic 模型
+│   ├── database/                  # SQLAlchemy + SQLite
+│   ├── services/
+│   │   ├── llm_service.py         # MiniMax 客户端 + 6 套 prompts
+│   │   ├── rocket_chat_service.py # IM 集成
+│   │   ├── affine_service.py      # 文档/画布服务
+│   │   ├── deck_spec.py           # PPT 中间格式
+│   │   ├── deck_renderer.py       # Slidev / PPTX / PDF 渲染
+│   │   ├── delivery_service.py    # 交付卡片 + 归档
+│   │   └── sync_service.py        # 多端同步
+│   └── tools/
+│       ├── doc_tool.py            # 文档工具
+│       ├── ppt_tool.py            # PPT 工具（接入 DeckSpec）
+│       ├── im_tool.py             # IM 工具
+│       └── lark_tool.py           # 飞书工具
+├── frontend/                       # React + Vite（待改造）
+├── requirements.txt
+└── .gitignore
 ```
 
-健康检查：
+---
 
-```text
-http://localhost:8000/api/health
-```
+## LLM Prompt 模板
 
-### 5. Install frontend dependencies
+`backend/services/llm_service.py` 中预置了 6 套 system prompt：
 
-```powershell
-cd D:\IM_agent\frontend
-npm install
-```
+| 名称 | 用途 |
+|---|---|
+| `intent_parser` | 解析用户意图，输出 JSON（intent_summary / content_types / audience / constraints / questions） |
+| `planner` | 工作流规划，输出 steps（module + action + needs_approval） |
+| `doc_writer` | PRD 文档撰写（背景/目标/需求详情/里程碑/风险） |
+| `slides_generator` | PPT 结构生成（DeckSpec JSON） |
+| `summarizer` | 群聊上下文总结（话题/观点/共识/待办/决策） |
+| `rehearsal` | 排练材料（讲稿/时长/Q&A/提示） |
 
-### 6. Run frontend
+---
 
-```powershell
-cd D:\IM_agent\frontend
-npm run dev -- --host 0.0.0.0 --port 3000
-```
+## API 概要
 
-打开：
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/health` | 健康检查 |
+| `POST` | `/api/sessions` | 创建会话 |
+| `GET` | `/api/sessions/{id}` | 查询会话 |
+| `GET` | `/api/sessions/{id}/messages` | 历史消息 |
+| `POST` | `/api/sessions/{id}/messages` | 发送需求并触发工作流 |
+| `GET` | `/api/tasks/{id}` | 查询任务 |
+| `POST` | `/api/tasks/{id}/confirm` | 确认/否决待审批节点 |
+| `GET` | `/api/documents/{id}` | 获取文档 |
+| `GET` | `/api/slides/{id}` | 获取 PPT |
+| `WS` | `/api/ws/sessions/{id}` | 实时推送进度 |
 
-```text
-http://localhost:3000
-```
+---
 
-## Environment Variables
+## 路线图
 
-本项目使用 Pydantic Settings 读取环境变量。后端会从以下位置读取：
+### 已完成（基线 v0.1）
+- [x] LLM 服务（MiniMax 适配）
+- [x] 9 节点工作流（接入 LLM）
+- [x] 文档生成（PRD）
+- [x] PPT 生成（DeckSpec → PPTX/Slidev/PDF）
+- [x] 交付卡片 + 归档
+- [x] 多端同步服务（含 mock）
+- [x] FastAPI + WebSocket 端到端
 
-- `.env`
-- `backend/.env`
+### 待办（v0.2+）
+- [ ] 前端 AgentPanel / DeliveryCard 组件
+- [ ] Rocket.Chat 真实实例对接
+- [ ] AFFiNE 真实实例对接
+- [ ] Redis 多端联调
+- [ ] 块级文档协作（CRDT/OT）
+- [ ] 排练模式 UI
+- [ ] 角色权限 / 审批流
 
-建议本地开发使用 `backend/.env`，并从 [backend/.env.example](./backend/.env.example) 复制。
-
-核心配置包括：
-
-- `OPENAI_API_KEY`: LLM API Key。
-- `OPENAI_BASE_URL`: OpenAI-compatible API 地址。
-- `LLM_MODEL`: 模型名称。
-- `DATABASE_URL`: SQLite 数据库地址，默认即可。
-- `LARK_CLI_ENABLED`: 是否启用真实飞书同步。
-- `LARK_CLI_BIN`: `lark-cli` 可执行文件路径。
-- `LARK_CLI_AS`: CLI 调用身份，默认 `user`。
-- `LARK_DEFAULT_CHAT_ID`: 可选，配置后可用于飞书群消息通知。
-
-飞书 CLI 配置比较容易踩坑，单独见 [docs/lark-cli-setup.md](./docs/lark-cli-setup.md)。
-
-## Lark / Feishu Sync
-
-飞书集成采用官方 `@larksuite/cli`，不直接在代码里维护 OpenAPI token。当前同步策略是：
-
-- 本地文档和 PPT 先生成成功。
-- 点击“同步到飞书”后，后端调用 `lark-cli` 上传交付物。
-- 飞书同步失败不会影响本地预览和下载。
-- 前端默认只同步文件，不自动发送群消息；需要消息通知时可配置 `LARK_DEFAULT_CHAT_ID` 并在接口请求里开启 `notify`。
-
-快速配置入口：
-
-```powershell
-npm install -g @larksuite/cli
-lark-cli config init --new
-lark-cli auth login --recommend
-lark-cli auth login --scope "drive:file:upload"
-lark-cli auth status
-```
-
-Windows 上如果后端找不到 `lark-cli`，建议在 `.env` 里显式指定：
-
-```env
-LARK_CLI_BIN=C:\Users\<your-user>\AppData\Roaming\npm\lark-cli.cmd
-```
-
-更多步骤和排错见 [docs/lark-cli-setup.md](./docs/lark-cli-setup.md)。
-
-## Useful Commands
-
-后端单测：
-
-```powershell
-python -m unittest backend.tests.test_lark_tool
-```
-
-前端构建：
-
-```powershell
-cd frontend
-npm run build
-```
-
-查看当前分支改动：
-
-```powershell
-git status --short --branch
-```
-
-## API Overview
-
-常用接口：
-
-- `GET /api/health`: 后端健康检查，并返回飞书 CLI 可用状态。
-- `POST /api/sessions`: 创建会话。
-- `POST /api/sessions/{session_id}/messages`: 发送用户需求并启动 Agent 任务。
-- `GET /api/tasks/{task_id}`: 查询任务状态。
-- `GET /api/documents/{document_id}`: 查询生成文档。
-- `GET /api/slides/{slide_id}`: 查询生成 PPT 数据。
-- `GET /api/files/slides/{filename}`: 下载本地生成的 PPTX。
-- `POST /api/artifacts/{artifact_id}/sync/lark`: 将文档或 PPT 同步到飞书。
-
-## Troubleshooting
-
-### Backend import error
-
-如果出现：
-
-```text
-Error loading ASGI app. Could not import module "backend.main".
-```
-
-通常是启动目录不对。请回到项目根目录运行：
-
-```powershell
-cd D:\IM_agent
-python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Frontend proxy ECONNREFUSED
-
-如果 Vite 显示 `/api/health ECONNREFUSED`，说明后端没有成功运行在 `localhost:8000`。先检查后端窗口是否启动成功，再刷新前端页面。
-
-### LLM returns 400
-
-检查 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `LLM_MODEL` 是否匹配同一个服务商。比如 SiliconFlow 不能直接使用 OpenAI 的 `gpt-4` 模型名。
-
-### PPT generated but not visible
-
-确认任务结果里存在 `slides.file_path`，并且后端 `/api/files/slides/{filename}` 能下载对应文件。当前前端预览和下载都依赖后端返回的本地 PPT 文件路径。
-
-## Security Notes
-
-- 不要提交 `.env`、API Key、App Secret、飞书 token 或本机 CLI 配置。
-- `backend/.env.example` 只放占位值，并保持与 `backend/.env` 相同的配置项。
-- `temp/`、`data/`、`dist/`、`node_modules/` 默认不提交。
+---
 
 ## License
 
-当前仓库尚未声明开源许可证。若计划公开发布，请先补充 LICENSE 文件。
+Internal / Competition use.
