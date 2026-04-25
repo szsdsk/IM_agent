@@ -63,7 +63,7 @@ export const api = {
   async syncArtifactToLark(artifactId: string): Promise<LarkSyncResponse> {
     return fetchAPI<LarkSyncResponse>(`/artifacts/${artifactId}/sync/lark`, {
       method: 'POST',
-      body: JSON.stringify({ notify: true }),
+      body: JSON.stringify({ notify: false }),
     })
   },
 

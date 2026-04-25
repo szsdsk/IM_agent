@@ -93,6 +93,12 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
     }
   }
 
+  const syncResultText = syncResult
+    ? syncResult.success
+      ? syncResult.message || '已同步到飞书'
+      : syncResult.message || syncResult.error || '同步到飞书失败'
+    : ''
+
   if (!slides) {
     return (
       <div className={`bg-white border rounded-lg p-6 shadow-sm ${className}`}>
@@ -148,7 +154,7 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
             syncResult.success ? 'border-green-200 bg-green-50 text-green-700' : 'border-amber-200 bg-amber-50 text-amber-700'
           }`}
         >
-          <span>{syncResult.message || syncResult.error || '飞书同步已返回结果'}</span>
+          <span>{syncResultText}</span>
           {syncResult.lark_url && (
             <a
               className="ml-2 underline"

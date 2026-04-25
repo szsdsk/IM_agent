@@ -119,4 +119,3 @@ class LarkSyncResponse(BaseModel):
     lark_token: Optional[str] = None
     message: Optional[str] = None
     error: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None

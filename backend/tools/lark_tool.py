@@ -104,7 +104,6 @@ class LarkTool(BaseTool):
                 status["error"] = auth_result.get("error") or "Lark CLI is not authenticated."
             else:
                 status["message"] = "Lark CLI is available and authenticated."
-                status["details"] = auth_result.get("data")
 
         return status
 
@@ -194,22 +193,19 @@ class LarkTool(BaseTool):
             return {"success": False, "provider": "lark_cli", "error": f"File not found: {file_path}"}
 
         title = data.get("title") or file_path.name
-        # lark-cli 不同版本的 upload 参数可能略有差异，按最明确到最宽松逐个尝试。
-        command_candidates = [
-            ["drive", "+upload", "--file", str(file_path), "--name", title, *self._identity_args()],
-            ["drive", "+upload", "--file", str(file_path), *self._identity_args()],
-            ["drive", "upload", "--file", str(file_path), "--name", title, *self._identity_args()],
-            ["drive", "upload", "--file", str(file_path), *self._identity_args()],
-        ]
-
-        last_result: Dict[str, Any] = {}
-        for command in command_candidates:
-            result = await self._run_command(command)
-            if result.get("success"):
-                return self._with_lark_fields(result, title=title)
-            last_result = result
-
-        return last_result or {"success": False, "provider": "lark_cli", "error": "Lark file upload failed."}
+        upload_name = self._file_upload_name(title, file_path)
+        # lark-cli 会校验 --file 必须是当前工作目录内的相对路径。
+        # 因此这里切到文件所在目录执行命令，只把 ./文件名 传给 CLI。
+        result = await self._run_command([
+            "drive",
+            "+upload",
+            "--file",
+            f"./{file_path.name}",
+            "--name",
+            upload_name,
+            *self._identity_args(),
+        ], cwd=file_path.parent)
+        return self._with_lark_fields(result, title=upload_name)
 
     async def _send_message(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """向默认或指定飞书群发送交付通知。"""
@@ -251,7 +247,7 @@ class LarkTool(BaseTool):
             return {
                 **sync_result,
                 "artifact_id": artifact_id,
-                "message": "本地生成成功，但同步到飞书失败。",
+                "message": "本地生成成功，但同步到飞书失败，请检查飞书 CLI 配置。",
             }
 
         notify_result = None
@@ -271,13 +267,14 @@ class LarkTool(BaseTool):
             "lark_url": sync_result.get("lark_url"),
             "lark_token": sync_result.get("lark_token"),
             "message": "已同步到飞书。" if not notify_result else self._notify_message(notify_result),
-            "details": {
-                "sync": sync_result,
-                "notify": notify_result,
-            },
         }
 
-    async def _run_command(self, args: List[str], timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+    async def _run_command(
+        self,
+        args: List[str],
+        timeout_seconds: Optional[int] = None,
+        cwd: Optional[Path] = None,
+    ) -> Dict[str, Any]:
         """统一执行 lark-cli，并把 stdout/stderr 归一化成项目内部结果。"""
         cli_path = self._cli_path()
         if not cli_path:
@@ -287,7 +284,8 @@ class LarkTool(BaseTool):
                 "error": f"Lark CLI binary not found: {self._cli_bin}",
             }
 
-        command = [cli_path, *args, "--format", "json"]
+        # 当前 lark-cli 的部分命令（例如 auth status）默认输出 JSON，但不支持 --format。
+        command = [cli_path, *args]
         timeout = timeout_seconds or self._timeout_seconds
 
         try:
@@ -301,6 +299,7 @@ class LarkTool(BaseTool):
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                cwd=str(cwd) if cwd else None,
             )
         except subprocess.TimeoutExpired:
             return {
@@ -339,7 +338,7 @@ class LarkTool(BaseTool):
             "success": False,
             "provider": "lark_cli",
             "data": parsed,
-            "error": self._redact(stderr or stdout or f"Lark CLI exited with code {completed.returncode}"),
+            "error": self._friendly_error(stderr or stdout or f"Lark CLI exited with code {completed.returncode}"),
         }
 
     def _with_lark_fields(self, result: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
@@ -361,7 +360,7 @@ class LarkTool(BaseTool):
         return bool(self._cli_path())
 
     def _cli_path(self) -> Optional[str]:
-        """解析真实 CLI 路径，Windows 下 npm 全局命令通常会落到 lark-cli.cmd。"""
+        """解析真实 CLI 路径，只接受 PATH 可解析命令或 .env 显式完整路径。"""
         resolved = shutil.which(self._cli_bin)
         if resolved:
             return resolved
@@ -389,6 +388,13 @@ class LarkTool(BaseTool):
             return stripped
         return f"# {title}\n\n{stripped}" if stripped else f"# {title}"
 
+    def _file_upload_name(self, title: str, file_path: Path) -> str:
+        """生成飞书云空间文件名，避免 PPTX 等二进制文件上传后丢失扩展名。"""
+        name = (title or file_path.name).strip() or file_path.name
+        if Path(name).suffix:
+            return name
+        return f"{name}{file_path.suffix}"
+
     def _delivery_message(self, data: Dict[str, Any], sync_result: Dict[str, Any]) -> str:
         """生成发送到飞书群的默认交付消息。"""
         title = data.get("title") or "Agent-Pilot 交付物"
@@ -401,7 +407,7 @@ class LarkTool(BaseTool):
         """把飞书消息发送结果压缩成适合前端展示的一句话。"""
         if notify_result.get("success"):
             return "已同步到飞书，并已发送交付消息。"
-        return f"已同步到飞书，但消息发送失败：{notify_result.get('error')}"
+        return "已同步到飞书，但消息发送失败，请检查飞书群配置。"
 
     def _resolve_local_file(self, value: Optional[str]) -> Optional[Path]:
         """把前端可访问的下载 URL 或本地路径解析回后端文件路径。"""
@@ -450,6 +456,16 @@ class LarkTool(BaseTool):
                 if found:
                     return found
         return None
+
+    def _friendly_error(self, text: str) -> str:
+        """把 CLI 原始错误转换成可操作的提示。"""
+        redacted = self._redact(text)
+        if "unknown flag: --file" in redacted:
+            return (
+                f"{redacted}。当前 lark-cli 不支持官方 Drive 上传参数 --file，"
+                "请升级 @larksuite/cli 后重试，或先运行 lark-cli drive +upload --help 确认本机语法。"
+            )
+        return redacted
 
     def _redact(self, text: str) -> str:
         """日志和错误返回中隐藏本地配置里的敏感值。"""

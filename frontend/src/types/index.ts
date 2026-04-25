@@ -69,7 +69,6 @@ export interface LarkSyncResponse {
   lark_token?: string | null
   message?: string | null
   error?: string | null
-  details?: Record<string, any> | null
 }
 
 export interface Message {

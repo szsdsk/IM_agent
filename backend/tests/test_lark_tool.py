@@ -1,5 +1,7 @@
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from backend.tools.lark_tool import LarkTool
@@ -60,6 +62,33 @@ class LarkToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["lark_url"], "https://example.feishu.cn/docx/abc")
         self.assertEqual(result["lark_token"], "doc-token")
         self.assertEqual(run_mock.call_args.args[0][0], r"C:\Users\tester\AppData\Roaming\npm\lark-cli.cmd")
+        self.assertNotIn("--format", run_mock.call_args.args[0])
+
+    async def test_upload_file_uses_relative_path_inside_file_directory(self):
+        # lark-cli drive +upload 拒绝绝对路径，所以后端必须切到文件目录并传 ./文件名。
+        stdout = '{"data":{"file_token":"file-token","url":"https://example.feishu.cn/file/abc"}}'
+        process = FakeCompletedProcess(returncode=0, stdout=stdout)
+        tool = LarkTool(mock_mode=False, cli_enabled=True, cli_bin="lark-cli")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_file = Path(temp_dir) / "demo.pptx"
+            local_file.write_bytes(b"pptx")
+
+            with patch("backend.tools.lark_tool.shutil.which", return_value="lark-cli"):
+                with patch("backend.tools.lark_tool.subprocess.run", return_value=process) as run_mock:
+                    result = await tool.execute(
+                        action="upload_file",
+                        data={"file_path": str(local_file), "title": "Demo PPT"},
+                    )
+
+        command = run_mock.call_args.args[0]
+        self.assertTrue(result["success"])
+        self.assertEqual(result["lark_url"], "https://example.feishu.cn/file/abc")
+        self.assertIn("--file", command)
+        self.assertEqual(command[command.index("--file") + 1], "./demo.pptx")
+        self.assertIn("--name", command)
+        self.assertEqual(command[command.index("--name") + 1], "Demo PPT.pptx")
+        self.assertEqual(run_mock.call_args.kwargs["cwd"], str(local_file.parent))
 
     async def test_command_timeout_returns_failure(self):
         # 外部命令超时必须返回失败，避免 FastAPI 请求被长期挂住。
@@ -74,6 +103,18 @@ class LarkToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("timed out", result["error"])
+
+    async def test_upload_unknown_file_flag_returns_upgrade_hint(self):
+        # 本机 CLI 版本过旧时，应提示升级，而不是只暴露生硬的 unknown flag。
+        process = FakeCompletedProcess(returncode=1, stderr="Error: unknown flag: --file")
+        tool = LarkTool(mock_mode=False, cli_enabled=True, cli_bin="lark-cli")
+
+        with patch("backend.tools.lark_tool.shutil.which", return_value="lark-cli"):
+            with patch("backend.tools.lark_tool.subprocess.run", return_value=process):
+                result = await tool._run_command(["drive", "+upload", "--file", "demo.pptx"])
+
+        self.assertFalse(result["success"])
+        self.assertIn("请升级 @larksuite/cli", result["error"])
 
 
 if __name__ == "__main__":

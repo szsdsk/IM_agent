@@ -309,7 +309,6 @@ async def sync_artifact_to_lark(
         lark_token=result.get("lark_token"),
         message=result.get("message"),
         error=result.get("error"),
-        details=result.get("details") or result,
     )
 
 
