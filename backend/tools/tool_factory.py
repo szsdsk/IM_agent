@@ -1,8 +1,6 @@
-from backend.tools.im_tool import IMTool
 from backend.tools.doc_tool import DocTool
+from backend.tools.im_tool import IMTool
 from backend.tools.ppt_tool import PPTTool
-from backend.tools.lark_tool import LarkTool
-from backend.config import settings
 
 
 class ToolFactory:
@@ -17,11 +15,17 @@ class ToolFactory:
                 cls._tools[tool_name] = DocTool()
             elif tool_name == "PPTTool":
                 cls._tools[tool_name] = PPTTool()
-            elif tool_name == "LarkTool":
-                cls._tools[tool_name] = LarkTool()
             else:
                 raise ValueError(f"Unknown tool: {tool_name}")
         return cls._tools[tool_name]
+
+    @classmethod
+    def get_langchain_tool(cls, tool_name: str):
+        return cls.get_tool(tool_name).langchain_tool
+
+    @classmethod
+    async def invoke_tool(cls, tool_name: str, payload: dict):
+        return await cls.get_tool(tool_name).ainvoke(payload)
 
     @classmethod
     def get_all_tools(cls):
@@ -29,5 +33,12 @@ class ToolFactory:
             "IMTool": cls.get_tool("IMTool"),
             "DocTool": cls.get_tool("DocTool"),
             "PPTTool": cls.get_tool("PPTTool"),
-            "LarkTool": cls.get_tool("LarkTool")
+        }
+
+    @classmethod
+    def get_all_langchain_tools(cls):
+        return {
+            "IMTool": cls.get_langchain_tool("IMTool"),
+            "DocTool": cls.get_langchain_tool("DocTool"),
+            "PPTTool": cls.get_langchain_tool("PPTTool"),
         }

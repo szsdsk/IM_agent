@@ -1,8 +1,8 @@
-from typing import TypedDict, List, Optional, Dict, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional, TypedDict
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     session_id: str
     task_id: str
     intent: str
@@ -12,10 +12,22 @@ class AgentState(TypedDict):
     current_step: str
     messages: List[Dict[str, Any]]
     context_messages: List[Dict[str, Any]]
-    doc_content: Optional[Dict[str, Any]]
-    slides_content: Optional[Dict[str, Any]]
+    intent_analysis: Optional[Dict[str, Any]]
+    content_types: List[str]
+    presentation_scene: Optional[str]
+    audience: Optional[str]
+    constraints: List[str]
+    pending_questions: List[str]
+    workflow_plan: Optional[Dict[str, Any]]
+    steps: List[Dict[str, Any]]
+    waiting_approval: bool
     extracted_tasks: Optional[List[str]]
-    workflow_plan: Optional[List[str]]
+    doc_content: Optional[Dict[str, Any]]
+    doc_id: Optional[str]
+    canvas_content: Optional[Dict[str, Any]]
+    deck_spec: Optional[Dict[str, Any]]
+    slides_content: Optional[Dict[str, Any]]
+    slide_id: Optional[str]
     result: Optional[Dict[str, Any]]
     error: Optional[str]
     progress: float
@@ -40,12 +52,24 @@ def create_initial_state(
         current_step="receive_input",
         messages=[],
         context_messages=context_messages or [],
-        doc_content=None,
-        slides_content=None,
-        extracted_tasks=None,
+        intent_analysis=None,
+        content_types=[],
+        presentation_scene=None,
+        audience=None,
+        constraints=[],
+        pending_questions=[],
         workflow_plan=None,
+        steps=[],
+        waiting_approval=False,
+        extracted_tasks=None,
+        doc_content=None,
+        doc_id=None,
+        canvas_content=None,
+        deck_spec=None,
+        slides_content=None,
+        slide_id=None,
         result=None,
         error=None,
         progress=0.0,
-        updated_at=datetime.utcnow().isoformat()
+        updated_at=datetime.utcnow().isoformat(),
     )

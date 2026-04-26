@@ -1,4 +1,4 @@
-import type { Session, Task, Document, Slide, Message, Health, LarkSyncResponse } from '../types'
+﻿import type { Session, Task, Document, Slide, Message, Health, PresentationScene } from '../types'
 
 const API_BASE = '/api'
 
@@ -33,10 +33,15 @@ export const api = {
     return fetchAPI<Message[]>(`/sessions/${sessionId}/messages`)
   },
 
-  async sendMessage(sessionId: string, content: string, userId?: string): Promise<Task> {
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    userId?: string,
+    presentationScene?: PresentationScene
+  ): Promise<Task> {
     return fetchAPI<Task>(`/sessions/${sessionId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content, user_id: userId }),
+      body: JSON.stringify({ content, user_id: userId, presentation_scene: presentationScene }),
     })
   },
 
@@ -59,16 +64,25 @@ export const api = {
     return fetchAPI<Slide>(`/slides/${slideId}`)
   },
 
-  // 当前前端从任务入口同步，后端会自动选择任务里的 PPT 或文档交付物。
-  async syncArtifactToLark(artifactId: string): Promise<LarkSyncResponse> {
-    return fetchAPI<LarkSyncResponse>(`/artifacts/${artifactId}/sync/lark`, {
-      method: 'POST',
-      body: JSON.stringify({ notify: false }),
-    })
-  },
-
-  // health 里包含飞书 CLI 状态，用来控制“同步到飞书”按钮。
   async healthCheck(): Promise<Health> {
     return fetchAPI<Health>('/health')
+  },
+
+  async transcribeVoice(
+    audioBlob: Blob,
+    language = 'zh'
+  ): Promise<{ success: boolean; text?: string; error?: string; provider?: string }> {
+    const formData = new FormData()
+    const fileName = audioBlob.type.includes('pcm') ? 'voice.pcm' : 'voice.webm'
+    formData.append('file', audioBlob, fileName)
+    const response = await fetch(`${API_BASE}/voice/transcriptions?language=${encodeURIComponent(language)}`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(err.detail || '语音转写失败')
+    }
+    return response.json()
   },
 }

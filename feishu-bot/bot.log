@@ -38,3 +38,134 @@
 2026-04-26T09:22:51.897Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: ef666422-2797-4814-aa27-d78a2fa10d33; trace_id: 79b1bb87f80f08706745fc2b086f9a84; data: undefined"]]}
 2026-04-26T09:22:51.899Z Feishu event received {"keys":["schema","event_id","token","create_time","event_type","tenant_key","app_id","message","sender"],"eventKeys":[]}
 2026-04-26T09:26:04.837Z Agent-Pilot 任务已完成 {"sessionId":"1f284dc4-b229-4193-93b4-1fbc5f93b755","taskId":"544b9967-0843-4748-9c8c-7f6e7932e166","status":"completed"}
+2026-04-28T03:40:11.081Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T03:40:11.087Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T03:40:11.088Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T03:40:11.089Z SDK info {"args":[["client ready"]]}
+2026-04-28T03:40:11.091Z Feishu Bot long connection is starting
+2026-04-28T03:40:11.093Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T03:40:11.496Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T03:40:11.500Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T03:40:11.714Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633649842119855069&access_key=baf969c0aab2cf07abc2538ded840194&service_id=33554678&ticket=edf199bc-c814-4232-93d2-81294cef509e"]]}
+2026-04-28T03:40:11.915Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T03:40:11.922Z Feishu WS ready
+2026-04-28T03:40:11.925Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T03:40:41.275Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: c450c3a8-ef98-420d-a63d-f106aed4a837; trace_id: 0514710c04e986bb5e402c75a530855d; data: undefined"]]}
+2026-04-28T03:41:00.328Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: 7a8a8986-488c-486c-983b-37fe1addbc32; trace_id: 3b15122d02141a971233499a0d8f60d2; data: undefined"]]}
+2026-04-28T03:41:00.333Z Feishu event received {"keys":["schema","event_id","token","create_time","event_type","tenant_key","app_id","message","sender"],"eventKeys":[]}
+2026-04-28T03:41:00.335Z 收到飞书消息 {"messageId":"om_x100b50368a60009cb2b6264a0e6308e","chatId":"oc_4cdae7ece690235dd8e019161e7d5ac4","chatType":"p2p","senderId":"ou_3301230c38451e9bb689f28d50028515","text":"帮我生成PPT"}
+2026-04-28T03:41:00.338Z SDK debug {"args":[["get custom app token"]]}
+2026-04-28T03:41:00.342Z SDK debug {"args":[["request token"]]}
+2026-04-28T03:41:01.879Z Agent-Pilot 任务已完成 {"sessionId":"295b9c9e-4a8f-40ed-8458-f87a386f52cb","taskId":"e638d701-555e-4024-8834-6627e1227bf9","status":"failed"}
+2026-04-28T03:41:06.165Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: 3cce75c1-e8e9-48c9-9ef1-94ca8e483bf1; trace_id: 94c88332f614b0f0557c189388155b93; data: undefined"]]}
+2026-04-28T03:41:22.448Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: a0643dbc-dc9d-4762-b95a-b7d1962eab49; trace_id: be11bfbdbd559c5e5ab60e6c8f4e5fa1; data: undefined"]]}
+2026-04-28T06:05:14.325Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T06:05:14.329Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T06:05:14.330Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T06:05:14.330Z SDK info {"args":[["client ready"]]}
+2026-04-28T06:05:14.333Z Feishu Bot long connection is starting
+2026-04-28T06:05:14.337Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T06:05:14.823Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T06:05:14.835Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T06:05:15.550Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633687200522406842&access_key=8550bf5391d6dc60431be01769755135&service_id=33554678&ticket=f9ebb3c3-6868-44b9-87d5-31961356ef5d"]]}
+2026-04-28T06:05:15.837Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T06:05:15.843Z Feishu WS ready
+2026-04-28T06:05:15.844Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T07:50:03.210Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T07:50:03.214Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T07:50:03.220Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T07:50:03.222Z SDK info {"args":[["client ready"]]}
+2026-04-28T07:50:03.233Z Feishu Bot long connection is starting
+2026-04-28T07:50:03.235Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T07:50:04.019Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T07:50:04.021Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T07:50:04.187Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633714201492360130&access_key=5df579bec359542b789e6e7fe25b1845&service_id=33554678&ticket=2fb9a43f-9d59-49d6-9054-bea1e9e80b07"]]}
+2026-04-28T07:50:04.763Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T07:50:04.766Z Feishu WS ready
+2026-04-28T07:50:04.768Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:07:32.654Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:07:32.664Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:07:32.665Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:07:32.665Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:07:32.667Z Feishu Bot long connection is starting
+2026-04-28T14:07:32.668Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:07:32.964Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:07:32.965Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:07:33.301Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633811514478251202&access_key=6fa3b7e33cc67518cee086eaf673d0b4&service_id=33554678&ticket=598950a9-3732-4e6c-8a7b-c2d9752fd761"]]}
+2026-04-28T14:07:33.412Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:07:33.413Z Feishu WS ready
+2026-04-28T14:07:33.414Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:17:17.534Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:17:17.536Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:17:17.537Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:17:17.537Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:17:17.538Z Feishu Bot long connection is starting
+2026-04-28T14:17:17.538Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:17:17.709Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:17:17.711Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:17:18.039Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633814021691247811&access_key=7a07ec02946ab65c8e3a994f4c55034f&service_id=33554678&ticket=0816e577-22fb-471a-9988-32f0ee06f45b"]]}
+2026-04-28T14:17:18.194Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:17:18.195Z Feishu WS ready
+2026-04-28T14:17:18.196Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:32:50.375Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:32:50.377Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:32:50.377Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:32:50.378Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:32:50.378Z Feishu Bot long connection is starting
+2026-04-28T14:32:50.380Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:32:50.548Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:32:50.549Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:32:50.664Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633818012416265408&access_key=e3ccac634714dda9caf585aba3deca41&service_id=33554678&ticket=d1e164c7-abf4-4c1e-af35-635a42adf2ef"]]}
+2026-04-28T14:32:50.801Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:32:50.802Z Feishu WS ready
+2026-04-28T14:32:50.803Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:33:04.223Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: b9d4d986-8e22-431e-9490-b43d66dc900a; trace_id: 03e443c4ee1e79301455ea129aaa2845; data: undefined"]]}
+2026-04-28T14:33:53.339Z SDK debug {"args":[["[ws]","receive message, message_type: event; message_id: 336e21f9-fca9-43c2-bc71-fe2c8001378a; trace_id: 6e9eea261207b9e6cee596132fc42980; data: undefined"]]}
+2026-04-28T14:38:48.174Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:38:48.178Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:38:48.179Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:38:48.180Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:38:48.183Z Feishu Bot long connection is starting
+2026-04-28T14:38:48.184Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:38:48.345Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:38:48.364Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:38:48.587Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633819559933906110&access_key=2c0ad97523b6fa95f40519b9fe267e93&service_id=33554678&ticket=51a6e494-422a-4e9f-a688-dea731f001c9"]]}
+2026-04-28T14:38:48.677Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:38:48.680Z Feishu WS ready
+2026-04-28T14:38:48.682Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:42:29.286Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:42:29.288Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:42:29.289Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:42:29.296Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:42:29.298Z Feishu Bot long connection is starting
+2026-04-28T14:42:29.299Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:42:29.447Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:42:29.450Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:42:29.576Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633820520894565559&access_key=9b863492a4ccb492689c99290905e1ff&service_id=33554678&ticket=f27774e5-ca82-4ea9-9d90-e89ec7c2d58b"]]}
+2026-04-28T14:42:29.670Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:42:29.674Z Feishu WS ready
+2026-04-28T14:42:29.674Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:45:43.311Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:45:43.313Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:45:43.314Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:45:43.315Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:45:43.316Z Feishu Bot long connection is starting
+2026-04-28T14:45:43.317Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:45:43.493Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:45:43.496Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:45:43.624Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633821335936322743&access_key=49a717dbba06fd2ee2ea50489808983c&service_id=33554678&ticket=41882a80-6c9b-4c7f-8c6c-cbe7a1e20e65"]]}
+2026-04-28T14:45:43.760Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:45:43.763Z Feishu WS ready
+2026-04-28T14:45:43.764Z SDK info {"args":[["[ws]","ws client ready"]]}
+2026-04-28T14:49:20.600Z SDK debug {"args":[["use domain url: https://open.feishu.cn"]]}
+2026-04-28T14:49:20.602Z SDK debug {"args":[["app ticket manager is ready"]]}
+2026-04-28T14:49:20.603Z SDK debug {"args":[["token manager is ready"]]}
+2026-04-28T14:49:20.604Z SDK info {"args":[["client ready"]]}
+2026-04-28T14:49:20.605Z Feishu Bot long connection is starting
+2026-04-28T14:49:20.606Z Agent-Pilot backend {"backendUrl":"http://127.0.0.1:8000"}
+2026-04-28T14:49:20.795Z Feishu credential check {"ok":true,"code":0,"msg":"ok","hasToken":true}
+2026-04-28T14:49:20.797Z SDK info {"args":[["[ws]","receive events or callbacks through persistent connection only available in self-build & Feishu app, Configured in:\n        Developer Console(开发者后台) \n          ->\n        Events and Callbacks(事件与回调)\n          -> \n        Mode of event/callback subscription(订阅方式)\n          -> \n        Receive events/callbacks through persistent connection(使用 长连接 接收事件/回调)"]]}
+2026-04-28T14:49:20.993Z SDK debug {"args":[["[ws]","get connect config success, ws url: wss://msg-frontier.feishu.cn/ws/v2?fpid=493&aid=552564&device_id=7633822280426310853&access_key=b294ac19f9df22d00b12dcea3006e36d&service_id=33554678&ticket=8677985e-a3ef-419e-8651-5813465f897f"]]}
+2026-04-28T14:49:21.104Z SDK debug {"args":[["[ws]","ws connect success"]]}
+2026-04-28T14:49:21.109Z Feishu WS ready
+2026-04-28T14:49:21.110Z SDK info {"args":[["[ws]","ws client ready"]]}
