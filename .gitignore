@@ -23,5 +23,8 @@ build/
 .vscode/
 *.swp
 
+# Runtime logs
+*.log
+
 # frontend
 **/dist/
