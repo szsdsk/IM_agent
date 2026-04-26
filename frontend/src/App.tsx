@@ -5,9 +5,13 @@ import ProgressTimeline from './components/ProgressTimeline'
 import DocViewer from './components/DocViewer'
 import SlideViewer from './components/SlideViewer'
 import { api } from './services/api'
+import { wsService } from './services/websocket'
+import { useSessionStore } from './store/useSessionStore'
 
 export default function App() {
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null)
+  const sessionId = useSessionStore((state) => state.sessionId)
+  const setSessionId = useSessionStore((state) => state.setSessionId)
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -23,6 +27,33 @@ export default function App() {
     const interval = setInterval(checkHealth, 5000)
     return () => clearInterval(interval)
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const connectSession = async () => {
+      try {
+        if (sessionId) {
+          wsService.connect(sessionId)
+          return
+        }
+
+        const session = await api.createSession()
+        if (cancelled) return
+
+        setSessionId(session.id)
+        wsService.connect(session.id)
+      } catch (error) {
+        console.error('Failed to connect websocket session:', error)
+      }
+    }
+
+    connectSession()
+
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, setSessionId])
 
   return (
     <div className="min-h-screen bg-gray-50">

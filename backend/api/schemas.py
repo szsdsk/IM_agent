@@ -20,6 +20,7 @@ class SessionResponse(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     user_id: Optional[str] = None
+    room_id: Optional[str] = None
 
 
 class MessageResponse(BaseModel):
@@ -93,3 +94,29 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: datetime
     version: str = "1.0.0"
+    # 前端用这个字段判断是否展示/启用“同步到飞书”能力。
+    lark_cli: Optional[Dict[str, Any]] = None
+
+
+class LarkSyncRequest(BaseModel):
+    # 不传 chat_id 时后端会使用 LARK_DEFAULT_CHAT_ID。
+    chat_id: Optional[str] = None
+    # 默认同步后尝试发送交付消息；没有群配置时同步本身仍可成功。
+    notify: bool = True
+    # 允许前端覆盖同步到飞书后的标题。
+    title: Optional[str] = None
+    # 允许前端自定义发送到飞书群的交付文案。
+    message: Optional[str] = None
+
+
+class LarkSyncResponse(BaseModel):
+    success: bool
+    # 第一阶段只接入 lark-cli，保留 provider 字段方便以后扩展 OpenAPI 或其它 IM。
+    provider: str = "lark_cli"
+    artifact_id: str
+    artifact_type: Optional[str] = None
+    # 飞书返回字段在不同资源类型里名称不一致，接口层统一成 url/token。
+    lark_url: Optional[str] = None
+    lark_token: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None

@@ -1,4 +1,4 @@
-import type { Session, Task, Document, Slide, Message } from '../types'
+import type { Session, Task, Document, Slide, Message, Health, LarkSyncResponse } from '../types'
 
 const API_BASE = '/api'
 
@@ -59,7 +59,16 @@ export const api = {
     return fetchAPI<Slide>(`/slides/${slideId}`)
   },
 
-  async healthCheck(): Promise<{ status: string; timestamp: string }> {
-    return fetchAPI<{ status: string; timestamp: string }>('/health')
+  // 当前前端从任务入口同步，后端会自动选择任务里的 PPT 或文档交付物。
+  async syncArtifactToLark(artifactId: string): Promise<LarkSyncResponse> {
+    return fetchAPI<LarkSyncResponse>(`/artifacts/${artifactId}/sync/lark`, {
+      method: 'POST',
+      body: JSON.stringify({ notify: false }),
+    })
+  },
+
+  // health 里包含飞书 CLI 状态，用来控制“同步到飞书”按钮。
+  async healthCheck(): Promise<Health> {
+    return fetchAPI<Health>('/health')
   },
 }

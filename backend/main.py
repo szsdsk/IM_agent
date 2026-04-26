@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.config import settings
 from backend.database.connection import init_db
 from backend.api.endpoints import router as api_router
+from backend.services.lark_bot_service import lark_bot_service
 
 logging.basicConfig(
     level=logging.INFO if not settings.DEBUG else logging.DEBUG,
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
     yield
     logger.info("Shutting down Agent-Pilot Backend...")
+    await lark_bot_service.close()
 
 
 app = FastAPI(
