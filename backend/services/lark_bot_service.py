@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class LarkBotService:
-    """Feishu/Lark bot client based on tenant access token."""
+    """基于 tenant access token 的飞书 OpenAPI 客户端。"""
 
     def __init__(self):
         self.app_id = settings.LARK_APP_ID
@@ -41,12 +41,52 @@ class LarkBotService:
             await self._client.aclose()
             self._client = None
 
+    async def get_status(self, check_auth: bool = False) -> Dict[str, Any]:
+        """返回飞书应用配置和 tenant token 状态，避免健康检查再依赖 CLI。"""
+        configured = bool(self.app_id and self.app_secret)
+        status = {
+            "success": bool(settings.LARK_BOT_ENABLED and configured),
+            "provider": "lark_openapi",
+            "enabled": settings.LARK_BOT_ENABLED,
+            "configured": configured,
+            "authenticated": False,
+            "app_id_configured": bool(self.app_id),
+            "app_secret_configured": bool(self.app_secret),
+            "default_chat_id_configured": bool(settings.LARK_DEFAULT_CHAT_ID),
+        }
+
+        if not settings.LARK_BOT_ENABLED:
+            status["message"] = "飞书 OpenAPI 同步未开启。"
+            return status
+        if not configured:
+            status["error"] = "LARK_APP_ID or LARK_APP_SECRET is not configured."
+            return status
+        if not check_auth:
+            status["message"] = "飞书 OpenAPI 已配置，未检查 token。"
+            return status
+
+        try:
+            token = await self.get_tenant_access_token()
+        except Exception as exc:
+            logger.exception("Failed to check Lark OpenAPI status")
+            status["success"] = False
+            status["error"] = self._redact(str(exc))
+            return status
+
+        status["authenticated"] = bool(token)
+        status["success"] = bool(token)
+        if token:
+            status["message"] = "飞书 OpenAPI 已配置，tenant access token 可用。"
+        else:
+            status["error"] = "Failed to get tenant access token."
+        return status
+
     async def get_tenant_access_token(self) -> Optional[str]:
         if self._tenant_access_token and time.time() < self._token_expires_at:
             return self._tenant_access_token
 
         if not self.app_id or not self.app_secret:
-            logger.warning("Lark bot is not configured")
+            logger.warning("Lark OpenAPI is not configured")
             return None
 
         response = await self.client.post(
@@ -65,13 +105,13 @@ class LarkBotService:
 
     async def send_text(self, chat_id: str, text: str) -> Dict[str, Any]:
         if not self.is_configured:
-            return {"success": False, "provider": "lark_bot", "error": "Lark bot is not configured."}
+            return {"success": False, "provider": "lark_openapi", "error": "Lark OpenAPI is not configured."}
         if not chat_id:
-            return {"success": False, "provider": "lark_bot", "error": "Missing chat_id."}
+            return {"success": False, "provider": "lark_openapi", "error": "Missing chat_id."}
 
         token = await self.get_tenant_access_token()
         if not token:
-            return {"success": False, "provider": "lark_bot", "error": "Failed to get tenant access token."}
+            return {"success": False, "provider": "lark_openapi", "error": "Failed to get tenant access token."}
 
         response = await self.client.post(
             "/im/v1/messages",
@@ -87,25 +127,26 @@ class LarkBotService:
         data = response.json()
         return {
             "success": data.get("code") == 0,
-            "provider": "lark_bot",
+            "provider": "lark_openapi",
             "message_id": (data.get("data") or {}).get("message_id"),
             "error": None if data.get("code") == 0 else data.get("msg"),
             "raw": data,
         }
 
     async def upload_file(self, file_path: str, file_name: Optional[str] = None) -> Dict[str, Any]:
+        """上传 IM 临时文件，返回的 file_key 只能用于发送聊天文件消息。"""
         if not self.is_configured:
-            return {"success": False, "provider": "lark_bot", "error": "Lark bot is not configured."}
+            return {"success": False, "provider": "lark_openapi", "error": "Lark OpenAPI is not configured."}
 
         path = self._resolve_local_file(file_path)
         if not path:
-            return {"success": False, "provider": "lark_bot", "error": "Missing file_path."}
+            return {"success": False, "provider": "lark_openapi", "error": "Missing file_path."}
         if not path.is_file():
-            return {"success": False, "provider": "lark_bot", "error": f"File not found: {path}"}
+            return {"success": False, "provider": "lark_openapi", "error": f"File not found: {path}"}
 
         token = await self.get_tenant_access_token()
         if not token:
-            return {"success": False, "provider": "lark_bot", "error": "Failed to get tenant access token."}
+            return {"success": False, "provider": "lark_openapi", "error": "Failed to get tenant access token."}
 
         upload_name = file_name or path.name
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -125,7 +166,7 @@ class LarkBotService:
         file_key = (data.get("data") or {}).get("file_key")
         return {
             "success": data.get("code") == 0 and bool(file_key),
-            "provider": "lark_bot",
+            "provider": "lark_openapi",
             "file_key": file_key,
             "file_name": upload_name,
             "error": None if data.get("code") == 0 else data.get("msg"),
@@ -134,15 +175,15 @@ class LarkBotService:
 
     async def send_file(self, chat_id: str, file_key: str) -> Dict[str, Any]:
         if not self.is_configured:
-            return {"success": False, "provider": "lark_bot", "error": "Lark bot is not configured."}
+            return {"success": False, "provider": "lark_openapi", "error": "Lark OpenAPI is not configured."}
         if not chat_id:
-            return {"success": False, "provider": "lark_bot", "error": "Missing chat_id."}
+            return {"success": False, "provider": "lark_openapi", "error": "Missing chat_id."}
         if not file_key:
-            return {"success": False, "provider": "lark_bot", "error": "Missing file_key."}
+            return {"success": False, "provider": "lark_openapi", "error": "Missing file_key."}
 
         token = await self.get_tenant_access_token()
         if not token:
-            return {"success": False, "provider": "lark_bot", "error": "Failed to get tenant access token."}
+            return {"success": False, "provider": "lark_openapi", "error": "Failed to get tenant access token."}
 
         response = await self.client.post(
             "/im/v1/messages",
@@ -158,7 +199,7 @@ class LarkBotService:
         data = response.json()
         return {
             "success": data.get("code") == 0,
-            "provider": "lark_bot",
+            "provider": "lark_openapi",
             "message_id": (data.get("data") or {}).get("message_id"),
             "error": None if data.get("code") == 0 else data.get("msg"),
             "raw": data,
@@ -277,6 +318,14 @@ class LarkBotService:
         if suffix in {".opus", ".ogg", ".mp3", ".wav"}:
             return "opus"
         return "stream"
+
+    def _redact(self, text: str) -> str:
+        """错误日志中隐藏应用密钥和 LLM Key。"""
+        redacted = text
+        for secret in (settings.LARK_APP_SECRET, settings.OPENAI_API_KEY):
+            if secret:
+                redacted = redacted.replace(secret, "***")
+        return redacted[:2000]
 
 
 lark_bot_service = LarkBotService()
