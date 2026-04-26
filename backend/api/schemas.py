@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
 from datetime import datetime
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
 
 
 class CreateSessionRequest(BaseModel):
@@ -70,7 +71,8 @@ class DocumentResponse(BaseModel):
 class SlidesResponse(BaseModel):
     id: str
     task_id: str
-    slides_json: Optional[Dict[str, Any]]
+    # slides_json 既可能是 DeckSpec 对象，也可能是页面数组，所以这里保持宽松。
+    slides_json: Optional[Any]
     file_path: Optional[str]
     created_at: datetime
 

@@ -1,5 +1,5 @@
 """
-Backend Services
+Backend service exports.
 """
 from backend.services.llm_service import llm_service, LLMService
 from backend.services.rocket_chat_service import rocket_chat_service, RocketChatService

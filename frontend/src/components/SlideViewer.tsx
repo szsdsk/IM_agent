@@ -58,7 +58,7 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
         </div>
         {slides.file_path && (
           <div className="flex items-center gap-2">
-            {/* 下载仍然走本地后端文件接口，保证即使飞书未配置也能交付 PPT。 */}
+            {/* 网页端只负责本地交付，飞书交付统一走 bot 流程。 */}
             <a
               href={getDownloadHref(slides.file_path)}
               target="_blank"

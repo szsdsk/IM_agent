@@ -2,21 +2,26 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Set
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.connection import get_db
-from backend.database.connection import async_session_maker
-from backend.database.models import Document, Event, Session, Slide, Task
-from backend.api.schemas import (
-    CreateSessionRequest, SessionResponse,
-    SendMessageRequest, MessageResponse,
-    TaskResponse, TaskConfirmRequest,
-    DocumentResponse, SlidesResponse, HealthResponse,
-)
 from backend.agent.orchestrator import agent_orchestrator
+from backend.api.schemas import (
+    CreateSessionRequest,
+    DocumentResponse,
+    HealthResponse,
+    MessageResponse,
+    SendMessageRequest,
+    SessionResponse,
+    SlidesResponse,
+    TaskConfirmRequest,
+    TaskResponse,
+)
+from backend.database.connection import async_session_maker, get_db
+from backend.database.models import Document, Event, Session, Slide, Task
 from backend.services.lark_bot_service import lark_bot_service
 
 router = APIRouter()
@@ -53,6 +58,7 @@ manager = ConnectionManager()
 
 
 async def _run_lark_message_task(message: Dict[str, Any]) -> None:
+    """把飞书消息转换为一次独立的 Agent 任务。"""
     async with async_session_maker() as db:
         session = Session(
             id=str(uuid.uuid4()),
@@ -114,6 +120,7 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
+    # 网页端只需要知道后端是否存活，飞书同步状态不再作为网页能力暴露。
     return HealthResponse(
         status="healthy",
         timestamp=datetime.utcnow(),
@@ -122,6 +129,7 @@ async def health_check():
 
 @router.post("/im/lark/events")
 async def lark_event_callback(payload: Dict[str, Any], background_tasks: BackgroundTasks):
+    """飞书事件订阅入口，bot 收到文本消息后异步触发 Agent 流程。"""
     if lark_bot_service.is_url_verification(payload):
         if not lark_bot_service.verify_event(payload):
             raise HTTPException(status_code=403, detail="Invalid Lark verification token")
@@ -140,12 +148,12 @@ async def lark_event_callback(payload: Dict[str, Any], background_tasks: Backgro
 @router.post("/sessions", response_model=SessionResponse)
 async def create_session(
     request: CreateSessionRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     session = Session(
         id=str(uuid.uuid4()),
         user_id=request.user_id,
-        status="active"
+        status="active",
     )
     db.add(session)
     await db.commit()
@@ -178,7 +186,7 @@ async def get_session_messages(session_id: str, db: AsyncSession = Depends(get_d
             session_id=session_id,
             role="system",
             content=e.payload.get("content", "") if e.payload else "",
-            timestamp=e.created_at
+            timestamp=e.created_at,
         )
         for e in events
     ]
@@ -188,7 +196,7 @@ async def get_session_messages(session_id: str, db: AsyncSession = Depends(get_d
 async def send_message(
     session_id: str,
     request: SendMessageRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     session_result = await db.execute(select(Session).where(Session.id == session_id))
     session = session_result.scalar_one_or_none()
@@ -199,7 +207,7 @@ async def send_message(
         id=str(uuid.uuid4()),
         session_id=session_id,
         intent=request.content,
-        status="pending"
+        status="pending",
     )
     db.add(task)
     await db.commit()
@@ -234,7 +242,7 @@ async def send_message(
         intent=request.content,
         user_id=request.user_id,
         room_id=request.room_id,
-        ws_sender=ws_sender
+        ws_sender=ws_sender,
     )
 
     task.status = state["status"]
@@ -266,7 +274,7 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
 async def confirm_task(
     task_id: str,
     request: TaskConfirmRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Task).where(Task.id == task_id))
     task = result.scalar_one_or_none()
@@ -304,7 +312,7 @@ async def get_slides(slide_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/files/slides/{filename}")
 async def download_slide_file(filename: str):
-    """下载后端生成的 PPT 文件。"""
+    """下载后端生成的本地 PPT 文件。"""
     if Path(filename).name != filename:
         raise HTTPException(status_code=400, detail="Invalid file name")
 
@@ -340,7 +348,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             id=str(uuid.uuid4()),
                             session_id=session_id,
                             intent=request.content,
-                            status="pending"
+                            status="pending",
                         )
                         session_result.add(task)
                         await session_result.commit()
@@ -355,7 +363,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             intent=request.content,
                             user_id=request.user_id,
                             room_id=request.room_id,
-                            ws_sender=ws_sender
+                            ws_sender=ws_sender,
                         )
 
                         task.status = state["status"]
@@ -363,7 +371,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         task.result_json = {
                             "progress": state["progress"],
                             "result": state.get("result"),
-                            "error": state.get("error")
+                            "error": state.get("error"),
                         }
                         task.updated_at = datetime.utcnow()
                         await session_result.commit()

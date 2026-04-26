@@ -1,6 +1,7 @@
-from pydantic_settings import BaseSettings
-from pydantic import field_validator
 from typing import Optional
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -15,8 +16,10 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.minimaxi.com/v1"
     LLM_MODEL: str = "abab6.5s-chat"
 
-    # Rocket.Chat Configuration
+    # IM provider selector. The current demo defaults to Feishu/Lark bot events.
     IM_PROVIDER: str = "lark"
+
+    # Rocket.Chat Configuration
     ROCKET_CHAT_URL: Optional[str] = None
     ROCKET_CHAT_USER: Optional[str] = None
     ROCKET_CHAT_PASSWORD: Optional[str] = None
@@ -25,13 +28,12 @@ class Settings(BaseSettings):
     AFFINE_URL: Optional[str] = None
     AFFINE_TOKEN: Optional[str] = None
 
-    # Lark Configuration
+    # Lark / Feishu OpenAPI configuration for bot message receive/send and file delivery.
     LARK_APP_ID: Optional[str] = None
     LARK_APP_SECRET: Optional[str] = None
     LARK_VERIFICATION_TOKEN: Optional[str] = None
     LARK_BOT_ENABLED: bool = True
     LARK_BOT_REQUIRE_MENTION: bool = True
-    # OpenAPI 发送交付消息或文件时使用的默认飞书群聊 ID。
     LARK_DEFAULT_CHAT_ID: Optional[str] = None
 
     HOST: str = "0.0.0.0"

@@ -1,5 +1,27 @@
 node_modules/
-node_modules/
 .venv/
 .trae/
 data/
+
+temp/
+
+# Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# frontend
+**/dist/
