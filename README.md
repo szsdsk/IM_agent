@@ -168,13 +168,17 @@ node index.js
 - [x] 飞书 bot 文本消息入口
 - [x] 飞书 OpenAPI 文本消息发送、文件上传和文件消息发送
 - [x] README 和 `.env.example` 基础文档
+- [x] PPT 主题模板系统（business_blue / tech_dark / minimal 三套主题，4 种布局渲染）
+- [x] 飞书云文档写入（Docx API 创建文档 + Markdown 转 Block 写入）
+- [x] 飞书交互卡片（进度卡片 + 交付卡片，替代纯文本消息）
+- [x] 多端 SyncService 接入（Orchestrator 广播进度/交付，前端 session.sync 事件处理）
+- [x] LLM 主题推荐（DeckSpecModel 新增 theme 字段）
 
 进行中：
 
-- [ ] 多端同步从“网页进度推送”升级为移动端/桌面端双端一致性
-- [ ] 飞书 bot 与网页端的任务状态统一展示
-- [ ] 更稳定的 PPT 内容质量、版式和视觉模板
-- [ ] 文档生成后的可编辑协作流程
+- [ ] 飞书卡片交互回调（按钮点击触发确认/修改等操作）
+- [ ] 多端同步 Redis 模式验证（当前仅内存模式）
+- [ ] 文档在线编辑体验优化（飞书文档编辑后回写状态）
 
 待实现：
 
