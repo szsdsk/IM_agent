@@ -2,10 +2,75 @@
 DeckSpec - PPT 中间格式定义
 统一的演示稿描述格式，支持 Slidev 和 PptxGenJS 两种渲染器
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 import json
+
+
+# ============ Theme System ============
+
+@dataclass
+class ThemeColors:
+    primary: str = "#1A56DB"
+    primary_light: str = "#DBEAFE"
+    secondary: str = "#374151"
+    accent: str = "#F59E0B"
+    text_dark: str = "#111827"
+    text_light: str = "#FFFFFF"
+    text_muted: str = "#6B7280"
+    bg_white: str = "#FFFFFF"
+    bg_light: str = "#F9FAFB"
+    bg_dark: str = "#1F2937"
+    divider: str = "#E5E7EB"
+
+
+@dataclass
+class ThemeConfig:
+    name: str = "business_blue"
+    colors: ThemeColors = field(default_factory=ThemeColors)
+    font_title: str = "Microsoft YaHei"
+    font_body: str = "Microsoft YaHei"
+    title_size: int = 36
+    body_size: int = 18
+    bullet_size: int = 16
+
+    @classmethod
+    def business_blue(cls) -> "ThemeConfig":
+        return cls(name="business_blue", colors=ThemeColors(
+            primary="#1A56DB", primary_light="#DBEAFE",
+            secondary="#374151", accent="#F59E0B",
+        ))
+
+    @classmethod
+    def tech_dark(cls) -> "ThemeConfig":
+        return cls(name="tech_dark", colors=ThemeColors(
+            primary="#60A5FA", primary_light="#1E3A5F",
+            secondary="#9CA3AF", accent="#34D399",
+            text_dark="#F9FAFB", text_light="#F9FAFB",
+            text_muted="#9CA3AF", bg_white="#111827",
+            bg_light="#1F2937", bg_dark="#0F172A",
+            divider="#374151",
+        ))
+
+    @classmethod
+    def minimal(cls) -> "ThemeConfig":
+        return cls(name="minimal", colors=ThemeColors(
+            primary="#111827", primary_light="#F3F4F6",
+            secondary="#6B7280", accent="#3B82F6",
+        ))
+
+    @classmethod
+    def get_theme(cls, name: str) -> "ThemeConfig":
+        themes = {
+            "business_blue": cls.business_blue,
+            "tech_dark": cls.tech_dark,
+            "minimal": cls.minimal,
+        }
+        return themes.get(name, cls.business_blue)()
+
+    def to_dict(self) -> Dict:
+        return {"name": self.name, "colors": asdict(self.colors)}
 
 
 @dataclass
@@ -45,6 +110,7 @@ class DeckSpec:
     title: str
     audience: str = "管理层"
     duration_minutes: int = 5
+    theme: str = "business_blue"
     slides: List[SlideSpec] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -74,6 +140,7 @@ class DeckSpec:
             "title": self.title,
             "audience": self.audience,
             "duration_minutes": self.duration_minutes,
+            "theme": self.theme,
             "slides": [s.to_dict() for s in self.slides],
             "metadata": self.metadata,
             "created_at": self.created_at,
@@ -88,6 +155,7 @@ class DeckSpec:
             title=data.get("title", ""),
             audience=data.get("audience", "管理层"),
             duration_minutes=data.get("duration_minutes", 5),
+            theme=data.get("theme", "business_blue"),
             slides=[SlideSpec.from_dict(s) for s in data.get("slides", [])],
             metadata=data.get("metadata", {}),
             created_at=data.get("created_at", datetime.utcnow().isoformat()),

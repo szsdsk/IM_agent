@@ -90,6 +90,35 @@ class DocTool(BaseTool):
 
     async def _create_document(self, task_id: str, title: str, content: str) -> Dict[str, Any]:
         self._log("info", f"Creating document for task {task_id}")
+
+        # Try Feishu Docx API first
+        from backend.services.lark_bot_service import lark_bot_service
+        if lark_bot_service.is_configured:
+            try:
+                doc_result = await lark_bot_service.create_doc(title=title or "未命名文档")
+                if doc_result.get("success") and doc_result.get("document_id"):
+                    document_id = doc_result["document_id"]
+                    doc_url = doc_result.get("url", "")
+
+                    # Write content
+                    if content:
+                        write_result = await lark_bot_service.write_markdown_to_doc(
+                            document_id, content
+                        )
+                        self._log("info", f"Wrote {write_result.get('blocks_written', 0)} blocks to Feishu doc")
+
+                    return {
+                        "success": True,
+                        "doc_id": document_id,
+                        "title": title,
+                        "content": content,
+                        "doc_url": doc_url,
+                        "provider": "lark_docx",
+                    }
+            except Exception as exc:
+                self._log("warning", f"Feishu Docx API failed, falling back: {str(exc)}")
+
+        # Fallback: local only
         return {
             "success": True,
             "doc_id": f"doc_{int(time.time() * 1000)}",

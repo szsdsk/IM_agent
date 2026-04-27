@@ -287,6 +287,7 @@ async def generate_doc(state: AgentState) -> AgentState:
                 "title": title,
                 "content": content,
                 "content_preview": content[:500] + "..." if len(content) > 500 else content,
+                "doc_url": result.get("doc_url"),
             }
             state["doc_id"] = result.get("doc_id")
             _append_message(
@@ -416,6 +417,7 @@ async def deliver_result(state: AgentState) -> AgentState:
             "doc_id": state["doc_content"].get("doc_id"),
             "content": state["doc_content"].get("content"),
             "preview": state["doc_content"].get("content_preview"),
+            "doc_url": state["doc_content"].get("doc_url"),
         }
         delivery["document"] = doc_payload
         delivery["doc"] = doc_payload

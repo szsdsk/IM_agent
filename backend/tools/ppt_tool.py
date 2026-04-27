@@ -134,67 +134,38 @@ class PPTTool(BaseTool):
     ) -> Dict[str, Any]:
         self._log("info", f"Creating PPT for task {task_id}")
 
-        if not slides and not deck_spec:
-            slides = self._generate_mock_slides()
-
-        if deck_spec:
-            return await self._render_with_deck_spec(deck_spec, task_id)
-
-        if not slides:
-            slides = self._generate_mock_slides()
-
+        # Always use DeckSpec + PptxGenRenderer for themed output
         try:
-            from pptx import Presentation
-            from pptx.enum.text import PP_ALIGN
-            from pptx.util import Inches, Pt
+            from backend.services.deck_renderer import PptxGenRenderer
+            from backend.services.deck_spec import DeckSpec, SlideSpec
 
-            prs = Presentation()
-            prs.slide_width = Inches(13.333)
-            prs.slide_height = Inches(7.5)
-
-            for slide_data in slides:
-                layout = prs.slide_layouts[6]
-                slide = prs.slides.add_slide(layout)
-
-                if slide_data.get("title"):
-                    title_box = slide.shapes.add_textbox(
-                        Inches(0.5), Inches(0.5), Inches(12.333), Inches(1)
+            if deck_spec:
+                deck = DeckSpec.from_dict(deck_spec)
+            else:
+                if not slides:
+                    slides = self._generate_mock_slides()
+                deck = DeckSpec(title=title or "Presentation")
+                for s in slides:
+                    deck.add_slide(
+                        title=s.get("title", ""),
+                        layout=s.get("layout", "content"),
+                        bullets=s.get("bullets", []),
                     )
-                    text_frame = title_box.text_frame
-                    paragraph = text_frame.paragraphs[0]
-                    paragraph.text = slide_data["title"]
-                    paragraph.font.size = Pt(44)
-                    paragraph.font.bold = True
-                    paragraph.alignment = PP_ALIGN.CENTER
 
-                bullets = slide_data.get("bullets", [])
-                content = slide_data.get("content", "")
-                items = bullets if bullets else (content.split("\n") if content else [])
+            renderer = PptxGenRenderer(self._output_dir)
+            result = await renderer.render(deck, filename=f"{task_id}.pptx")
 
-                if items:
-                    content_box = slide.shapes.add_textbox(
-                        Inches(1), Inches(2), Inches(11.333), Inches(5)
-                    )
-                    text_frame = content_box.text_frame
-                    for index, item in enumerate(items):
-                        paragraph = text_frame.paragraphs[0] if index == 0 else text_frame.add_paragraph()
-                        paragraph.text = f"• {str(item)}"
-                        paragraph.font.size = Pt(24)
-                        paragraph.space_after = Pt(12)
-
-            filename = f"{task_id}_{int(time.time() * 1000)}.pptx"
-            filepath = os.path.join(self._output_dir, filename)
-            prs.save(filepath)
-
-            return {
-                "success": True,
-                "slide_id": f"slide_{int(time.time() * 1000)}",
-                "task_id": task_id,
-                "title": title or "Presentation",
-                "slides_count": len(slides),
-                "file_path": filepath,
-                "download_url": self._download_url(filepath),
-            }
+            if result.get("success"):
+                return {
+                    "success": True,
+                    "slide_id": f"slide_{int(time.time() * 1000)}",
+                    "task_id": task_id,
+                    "title": deck.title,
+                    "slides_count": len(deck.slides),
+                    "file_path": result["filepath"],
+                    "download_url": self._download_url(result["filepath"]),
+                }
+            return result
 
         except ImportError:
             self._log("warning", "python-pptx not available")
@@ -290,9 +261,10 @@ class PPTTool(BaseTool):
         return [
             {"index": 0, "title": "封面", "layout": "title", "bullets": []},
             {"index": 1, "title": "背景与目标", "layout": "content", "bullets": ["目标 1", "目标 2"]},
-            {"index": 2, "title": "执行计划", "layout": "content", "bullets": ["Phase 1", "Phase 2"]},
-            {"index": 3, "title": "风险与待办", "layout": "content", "bullets": ["风险 1", "待办 1"]},
-            {"index": 4, "title": "下一步", "layout": "content", "bullets": ["行动项"]},
+            {"index": 2, "title": "核心方案", "layout": "two_column", "bullets": ["方案 A: 快速迭代", "方案 B: 稳步推进", "优势: 低风险", "优势: 全面覆盖"]},
+            {"index": 3, "title": "技术架构", "layout": "diagram", "bullets": []},
+            {"index": 4, "title": "风险与待办", "layout": "content", "bullets": ["风险 1", "待办 1"]},
+            {"index": 5, "title": "下一步", "layout": "content", "bullets": ["行动项"]},
         ]
 
     async def _simulate_delay(self, seconds: float):

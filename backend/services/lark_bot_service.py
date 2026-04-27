@@ -4,7 +4,7 @@ import mimetypes
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -218,6 +218,36 @@ class LarkBotService:
             "upload": upload_result,
         }
 
+    async def send_card(self, chat_id: str, card: Dict[str, Any]) -> Dict[str, Any]:
+        """发送飞书交互卡片消息。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+        if not chat_id:
+            return {"success": False, "error": "Missing chat_id."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        response = await self.client.post(
+            "/im/v1/messages",
+            params={"receive_id_type": "chat_id"},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "success": data.get("code") == 0,
+            "provider": "lark_openapi",
+            "message_id": (data.get("data") or {}).get("message_id"),
+            "error": None if data.get("code") == 0 else data.get("msg"),
+        }
+
     def verify_event(self, payload: Dict[str, Any]) -> bool:
         if not self.verification_token:
             return True
@@ -326,6 +356,212 @@ class LarkBotService:
             if secret:
                 redacted = redacted.replace(secret, "***")
         return redacted[:2000]
+
+    # ============ Docx API ============
+
+    async def create_doc(self, title: str = "未命名文档", folder_token: str = None) -> Dict[str, Any]:
+        """创建飞书云文档，返回 document_id 和访问链接。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        payload: Dict[str, Any] = {"title": title}
+        if folder_token:
+            payload["folder_token"] = folder_token
+
+        response = await self.client.post(
+            "/docx/v1/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        doc = (data.get("data") or {}).get("document", {})
+        return {
+            "success": data.get("code") == 0,
+            "document_id": doc.get("document_id"),
+            "title": doc.get("title", title),
+            "url": (data.get("data") or {}).get("url", ""),
+            "revision_id": (data.get("data") or {}).get("revision_id"),
+            "error": None if data.get("code") == 0 else data.get("msg"),
+        }
+
+    async def create_doc_block(
+        self,
+        document_id: str,
+        block_id: str,
+        blocks: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """向飞书文档追加 block 内容。block_id 为页面根节点时用 document_id。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        payload = {"children": blocks}
+
+        response = await self.client.post(
+            f"/docx/v1/documents/{document_id}/blocks/{block_id}/children",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "success": data.get("code") == 0,
+            "children": (data.get("data") or {}).get("children", []),
+            "error": None if data.get("code") == 0 else data.get("msg"),
+        }
+
+    async def write_markdown_to_doc(
+        self,
+        document_id: str,
+        markdown: str,
+    ) -> Dict[str, Any]:
+        """将 Markdown 内容写入飞书文档。"""
+        blocks = markdown_to_lark_blocks(markdown)
+        if not blocks:
+            return {"success": True, "document_id": document_id, "blocks_written": 0}
+
+        result = await self.create_doc_block(document_id, document_id, blocks)
+        return {
+            **result,
+            "document_id": document_id,
+            "blocks_written": len(blocks) if result.get("success") else 0,
+        }
+
+
+def markdown_to_lark_blocks(markdown: str) -> List[Dict[str, Any]]:
+    """将 Markdown 转换为飞书 Docx block 结构。"""
+    blocks: List[Dict[str, Any]] = []
+
+    def _text_element(content: str, link: str = None) -> Dict:
+        elem: Dict[str, Any] = {"text_run": {"content": content}}
+        if link:
+            elem["text_run"]["link"] = {"url": link}
+        return elem
+
+    for line in markdown.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("### "):
+            blocks.append({
+                "block_type": 5,  # heading3
+                "heading3": {"elements": [_text_element(stripped[4:])]},
+            })
+        elif stripped.startswith("## "):
+            blocks.append({
+                "block_type": 4,  # heading2
+                "heading2": {"elements": [_text_element(stripped[3:])]},
+            })
+        elif stripped.startswith("# "):
+            blocks.append({
+                "block_type": 3,  # heading1
+                "heading1": {"elements": [_text_element(stripped[2:])]},
+            })
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            blocks.append({
+                "block_type": 16,  # bullet
+                "bullet": {"elements": [_text_element(stripped[2:])]},
+            })
+        elif stripped.startswith("> "):
+            blocks.append({
+                "block_type": 18,  # quote
+                "quote": {"elements": [_text_element(stripped[2:])]},
+            })
+        elif stripped == "---":
+            blocks.append({"block_type": 22})  # divider
+        else:
+            # Remove leading number prefix like "1. "
+            content = stripped
+            if len(content) > 2 and content[0].isdigit() and content[1] in ".)" :
+                content = content[2:].strip()
+            blocks.append({
+                "block_type": 2,  # text
+                "text": {"elements": [_text_element(content)]},
+            })
+
+    return blocks
+
+
+def build_progress_card(task_id: str, step: str, progress: float) -> Dict[str, Any]:
+    """构建任务进度卡片。"""
+    step_names = {
+        "receive_input": "接收输入",
+        "parse_intent": "分析需求",
+        "plan_workflow": "规划流程",
+        "extract_tasks": "提取任务",
+        "generate_doc": "生成文档",
+        "generate_slides": "生成 PPT",
+        "confirm_or_modify": "等待确认",
+        "deliver_result": "交付结果",
+    }
+    step_name = step_names.get(step, step)
+    pct = int(progress * 100)
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Agent-Pilot 任务进行中"},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**当前步骤**: {step_name}\n**任务 ID**: `{task_id}`"},
+            },
+            {
+                "tag": "progress_bar",
+                "progress_bar": {"percentage": pct, "indicator": True},
+            },
+        ],
+    }
+
+
+def build_delivery_card(
+    task_id: str,
+    doc_title: str = None,
+    doc_url: str = None,
+    slides_title: str = None,
+    slides_count: int = 0,
+) -> Dict[str, Any]:
+    """构建任务交付卡片。"""
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**任务 ID**: `{task_id}`"},
+        },
+    ]
+
+    if doc_title:
+        doc_line = f"📄 **文档**: {doc_title}"
+        if doc_url:
+            doc_line += f"  [查看]({doc_url})"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": doc_line}})
+
+    if slides_title:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📊 **PPT**: {slides_title} ({slides_count} 页)"},
+        })
+
+    elements.append({"tag": "hr"})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Agent-Pilot 任务完成"},
+            "template": "green",
+        },
+        "elements": elements,
+    }
 
 
 lark_bot_service = LarkBotService()
