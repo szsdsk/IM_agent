@@ -173,11 +173,11 @@ node index.js
 - [x] 飞书交互卡片（进度卡片 + 交付卡片，替代纯文本消息）
 - [x] 多端 SyncService 接入（Orchestrator 广播进度/交付，前端 session.sync 事件处理）
 - [x] LLM 主题推荐（DeckSpecModel 新增 theme 字段）
+- [x] 飞书卡片交互回调（确认交付/需要修改按钮 + POST /api/im/lark/card/action 端点）
+- [x] 多端同步 Redis 模式验证（内存/Redis 双通道测试通过）
 
 进行中：
 
-- [ ] 飞书卡片交互回调（按钮点击触发确认/修改等操作）
-- [ ] 多端同步 Redis 模式验证（当前仅内存模式）
 - [ ] 文档在线编辑体验优化（飞书文档编辑后回写状态）
 
 待实现：
