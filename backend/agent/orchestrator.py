@@ -8,12 +8,17 @@ from langgraph.graph import END, START, StateGraph
 from backend.agent import nodes
 from backend.agent.state import AgentState, create_initial_state
 from backend.config import settings
-from backend.services.lark_bot_service import lark_bot_service
+from backend.services.lark_bot_service import (
+    build_delivery_card,
+    build_progress_card,
+    lark_bot_service,
+)
 from backend.services.rocket_chat_service import (
     fetch_im_context,
     post_delivery_to_im,
     rocket_chat_service,
 )
+from backend.services.sync_service import EventType, sync_service
 from backend.tools.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
@@ -188,6 +193,16 @@ class AgentOrchestrator:
         await self.trigger_callback("completed", completed_message)
         await self._push_completion_to_im(room_id, current_state)
 
+        # SyncService broadcast completion
+        try:
+            await sync_service.broadcast_delivery(
+                session_id=current_state.get("session_id", ""),
+                task_id=current_state["task_id"],
+                delivery=current_state.get("result") or {},
+            )
+        except Exception:
+            pass
+
         return current_state
 
     async def _publish_progress(
@@ -212,6 +227,18 @@ class AgentOrchestrator:
         await self.trigger_callback("progress", progress_message)
         await self._push_progress_to_im(room_id, task_id, state)
 
+        # SyncService broadcast for multi-tab consistency
+        try:
+            await sync_service.broadcast_task_progress(
+                session_id=state.get("session_id", ""),
+                task_id=task_id,
+                step=state.get("current_step", ""),
+                progress=state.get("progress", 0),
+                message=f"Executing: {state.get('current_step')}",
+            )
+        except Exception:
+            pass
+
     async def _push_progress_to_im(self, room_id: Optional[str], task_id: str, state: AgentState) -> None:
         if not room_id:
             return
@@ -220,13 +247,17 @@ class AgentOrchestrator:
             if settings.IM_PROVIDER == "lark":
                 if not lark_bot_service.is_configured:
                     return
-                text = (
-                    "Agent-Pilot 任务进行中\n"
-                    f"进度: {int(float(state.get('progress', 0)) * 100)}%\n"
-                    f"步骤: {state.get('current_step')}\n"
-                    f"任务: {task_id}"
-                )
-                await lark_bot_service.send_text(room_id, text)
+                card = build_progress_card(task_id, state.get("current_step", ""), state.get("progress", 0))
+                result = await lark_bot_service.send_card(room_id, card)
+                if not result.get("success"):
+                    # Fallback to text
+                    text = (
+                        "Agent-Pilot 任务进行中\n"
+                        f"进度: {int(float(state.get('progress', 0)) * 100)}%\n"
+                        f"步骤: {state.get('current_step')}\n"
+                        f"任务: {task_id}"
+                    )
+                    await lark_bot_service.send_text(room_id, text)
                 return
 
             if not rocket_chat_service.is_configured:
@@ -252,7 +283,21 @@ class AgentOrchestrator:
             if settings.IM_PROVIDER == "lark":
                 if not lark_bot_service.is_configured:
                     return
-                await lark_bot_service.send_text(room_id, self._build_lark_delivery_text(state))
+                result = state.get("result", {})
+                doc_info = result.get("document") or result.get("doc") or {}
+                slides_info = result.get("slides") or result.get("deck") or {}
+
+                card = build_delivery_card(
+                    task_id=state["task_id"],
+                    doc_title=doc_info.get("title") if isinstance(doc_info, dict) else None,
+                    doc_url=doc_info.get("doc_url") if isinstance(doc_info, dict) else None,
+                    slides_title=slides_info.get("title") if isinstance(slides_info, dict) else None,
+                    slides_count=slides_info.get("slides_count", 0) if isinstance(slides_info, dict) else 0,
+                )
+                card_result = await lark_bot_service.send_card(room_id, card)
+                if not card_result.get("success"):
+                    await lark_bot_service.send_text(room_id, self._build_lark_delivery_text(state))
+
                 await self._push_lark_delivery_files(room_id, state)
                 return
 

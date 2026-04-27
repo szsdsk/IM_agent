@@ -54,6 +54,7 @@ class DeckSpecModel(BaseModel):
     title: str = ""
     audience: str = "管理层"
     duration_minutes: int = 5
+    theme: str = "business_blue"
     slides: List[DeckSlide] = Field(default_factory=list)
 
 
@@ -275,7 +276,11 @@ SYSTEM_PROMPTS = {
 - 每页有明确标题和内容
 - 控制信息密度，适合演讲展示
 - 适当使用图表和可视化建议
-- 输出结构化演示稿信息。""",
+- 输出结构化演示稿信息
+- theme 字段从 business_blue / tech_dark / minimal 中选择最合适的主题
+  - business_blue: 商务蓝色，适合正式汇报
+  - tech_dark: 科技深色，适合技术分享
+  - minimal: 极简风格，适合简洁报告""",
 
     "summarizer": """你是一个会议和讨论总结助手。分析 IM 对话上下文，提取核心话题、观点、共识、待办和决策。""",
 
@@ -343,6 +348,7 @@ async def generate_deck_spec(title: str, doc_content: str, audience: str = "管�
         "title": title,
         "audience": audience,
         "duration_minutes": 5,
+        "theme": "business_blue",
         "slides": [
             {"index": 0, "title": "封面", "layout": "title", "content": title, "bullets": []},
             {"index": 1, "title": "背景与目标", "layout": "content", "content": "说明背景、目标和价值。", "bullets": []},

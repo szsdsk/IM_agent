@@ -99,7 +99,8 @@ class WebSocketService {
             content: resultDoc.content || resultDoc.preview || '',
             version: 1,
             created_at: data.timestamp,
-          })
+            doc_url: resultDoc.doc_url || null,
+          } as any)
         }
         if (resultSlides) {
           store.setSlides({
@@ -142,6 +143,17 @@ class WebSocketService {
         break
 
       case 'session.sync':
+        // Sync state from another tab/client
+        if (data.state) {
+          const syncState = data.state
+          const tasks = syncState.tasks || {}
+          const latestTask = Object.values(tasks).pop() as any
+          if (latestTask) {
+            if (latestTask.current_step) store.setCurrentStep(latestTask.current_step)
+            if (latestTask.progress !== undefined) store.setProgress(latestTask.progress)
+            if (latestTask.status) store.setStatus(latestTask.status as SessionStatus)
+          }
+        }
         break
     }
   }
