@@ -45,7 +45,7 @@ Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它把 
 
 | 层级 | 技术 |
 | --- | --- |
-| Backend | FastAPI、SQLAlchemy、aiosqlite、httpx、python-pptx |
+| Backend | FastAPI、LangChain、LangGraph、SQLAlchemy、aiosqlite、httpx、python-pptx |
 | Frontend | React、TypeScript、Vite、Tailwind CSS、Zustand |
 | Bot | Node.js、`@larksuiteoapi/node-sdk` |
 | Database | SQLite，后续可替换为 PostgreSQL |

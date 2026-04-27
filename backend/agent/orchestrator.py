@@ -1,11 +1,12 @@
 import logging
-from typing import Dict, Any, Optional, List
-from datetime import datetime
 from collections import defaultdict
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
 
-from backend.agent.state import AgentState, create_initial_state
+from langgraph.graph import END, START, StateGraph
+
 from backend.agent import nodes
-from backend.tools.tool_factory import ToolFactory
+from backend.agent.state import AgentState, create_initial_state
 from backend.config import settings
 from backend.services.lark_bot_service import lark_bot_service
 from backend.services.rocket_chat_service import (
@@ -13,16 +14,116 @@ from backend.services.rocket_chat_service import (
     post_delivery_to_im,
     rocket_chat_service,
 )
+from backend.tools.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
     def __init__(self):
-        self._callbacks: Dict[str, List[callable]] = defaultdict(list)
-        self._tools = ToolFactory.get_all_tools()
+        self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
+        self._tools = ToolFactory.get_all_langchain_tools()
+        self._workflow = self._build_workflow()
 
-    def register_callback(self, event: str, callback: callable):
+    def _build_workflow(self):
+        """构建 LangGraph 条件工作流。"""
+        graph = StateGraph(AgentState)
+
+        graph.add_node("receive_input", nodes.receive_input)
+        graph.add_node("parse_intent", nodes.parse_intent)
+        graph.add_node("plan_workflow", nodes.plan_workflow)
+        graph.add_node("extract_tasks", nodes.extract_tasks)
+        graph.add_node("generate_doc", nodes.generate_doc)
+        graph.add_node("generate_canvas", nodes.generate_canvas)
+        graph.add_node("generate_slides", nodes.generate_slides)
+        graph.add_node("confirm_or_modify", nodes.confirm_or_modify)
+        graph.add_node("deliver_result", nodes.deliver_result)
+
+        graph.add_edge(START, "receive_input")
+        graph.add_edge("receive_input", "parse_intent")
+        graph.add_edge("parse_intent", "plan_workflow")
+        graph.add_edge("plan_workflow", "extract_tasks")
+
+        graph.add_conditional_edges(
+            "extract_tasks",
+            self._route_after_extract,
+            {
+                "generate_doc": "generate_doc",
+                "generate_canvas": "generate_canvas",
+                "generate_slides": "generate_slides",
+                "confirm_or_modify": "confirm_or_modify",
+                "deliver_result": "deliver_result",
+            },
+        )
+        graph.add_conditional_edges(
+            "generate_doc",
+            self._route_after_doc,
+            {
+                "generate_canvas": "generate_canvas",
+                "generate_slides": "generate_slides",
+                "confirm_or_modify": "confirm_or_modify",
+                "deliver_result": "deliver_result",
+            },
+        )
+        graph.add_conditional_edges(
+            "generate_canvas",
+            self._route_after_canvas,
+            {
+                "generate_slides": "generate_slides",
+                "confirm_or_modify": "confirm_or_modify",
+                "deliver_result": "deliver_result",
+            },
+        )
+        graph.add_conditional_edges(
+            "generate_slides",
+            self._route_after_slides,
+            {
+                "confirm_or_modify": "confirm_or_modify",
+                "deliver_result": "deliver_result",
+            },
+        )
+        graph.add_edge("confirm_or_modify", "deliver_result")
+        graph.add_edge("deliver_result", END)
+
+        return graph.compile()
+
+    @staticmethod
+    def _route_after_extract(state: AgentState) -> str:
+        if state.get("error"):
+            return "deliver_result"
+        if nodes.needs_doc(state):
+            return "generate_doc"
+        if nodes.needs_canvas(state):
+            return "generate_canvas"
+        if nodes.needs_deck(state):
+            return "generate_slides"
+        return "confirm_or_modify"
+
+    @staticmethod
+    def _route_after_doc(state: AgentState) -> str:
+        if state.get("error"):
+            return "deliver_result"
+        if nodes.needs_canvas(state):
+            return "generate_canvas"
+        if nodes.needs_deck(state):
+            return "generate_slides"
+        return "confirm_or_modify"
+
+    @staticmethod
+    def _route_after_canvas(state: AgentState) -> str:
+        if state.get("error"):
+            return "deliver_result"
+        if nodes.needs_deck(state):
+            return "generate_slides"
+        return "confirm_or_modify"
+
+    @staticmethod
+    def _route_after_slides(state: AgentState) -> str:
+        if state.get("error"):
+            return "deliver_result"
+        return "confirm_or_modify"
+
+    def register_callback(self, event: str, callback: Callable):
         self._callbacks[event].append(callback)
 
     async def trigger_callback(self, event: str, data: Dict[str, Any]):
@@ -30,8 +131,8 @@ class AgentOrchestrator:
             for callback in self._callbacks[event]:
                 try:
                     await callback(data)
-                except Exception as e:
-                    logger.error(f"Callback error for {event}: {str(e)}")
+                except Exception as exc:
+                    logger.error("Callback error for %s: %s", event, str(exc))
 
     async def execute_workflow(
         self,
@@ -40,14 +141,14 @@ class AgentOrchestrator:
         intent: str,
         user_id: Optional[str] = None,
         room_id: Optional[str] = None,
-        ws_sender: callable = None,
+        ws_sender: Callable = None,
     ) -> AgentState:
         context_messages: List[Dict[str, Any]] = []
         if room_id and settings.IM_PROVIDER == "rocket_chat":
             try:
                 context_messages = await fetch_im_context(room_id, limit=20)
-            except Exception as e:
-                logger.warning(f"Failed to fetch Rocket.Chat context for room {room_id}: {str(e)}")
+            except Exception as exc:
+                logger.warning("Failed to fetch Rocket.Chat context for room %s: %s", room_id, str(exc))
 
         state = create_initial_state(
             session_id,
@@ -58,61 +159,58 @@ class AgentOrchestrator:
             context_messages=context_messages,
         )
 
-        workflow_nodes = [
-            nodes.receive_input,
-            nodes.parse_intent,
-            nodes.plan_workflow,
-            nodes.extract_tasks,
-            nodes.generate_doc,
-            nodes.generate_slides,
-            nodes.confirm_or_modify,
-            nodes.deliver_result
-        ]
-
-        for node in workflow_nodes:
-            try:
-                state = await node(state)
-
-                progress_message = {
-                    "type": "task.progress",
-                    "task_id": task_id,
-                    "step": state["current_step"],
-                    "message": f"Executing: {state['current_step']}",
-                    "progress": state["progress"],
-                    "status": state["status"],
-                    "timestamp": state["updated_at"],
-                    "updated_at": state["updated_at"]
-                }
-                if ws_sender:
-                    await ws_sender(progress_message)
-                await self.trigger_callback("progress", progress_message)
-                await self._push_progress_to_im(room_id, task_id, state)
-
-                if state.get("error"):
-                    logger.error(f"Task {task_id} error at {state['current_step']}: {state['error']}")
-                    break
-
-            except Exception as e:
-                logger.error(f"Error in node {node.__name__}: {str(e)}")
-                state["error"] = str(e)
-                state["status"] = "failed"
-                break
+        current_state: AgentState = state
+        try:
+            async for event in self._workflow.astream(state, stream_mode="updates"):
+                for node_name, node_update in event.items():
+                    if node_name == END:
+                        continue
+                    if isinstance(node_update, dict):
+                        current_state = AgentState(**{**current_state, **node_update})
+                    await self._publish_progress(room_id, task_id, current_state, ws_sender)
+        except Exception as exc:
+            logger.exception("LangGraph workflow failed for task %s", task_id)
+            current_state["error"] = str(exc)
+            current_state["status"] = "failed"
+            current_state["updated_at"] = datetime.utcnow().isoformat()
 
         completed_message = {
-            "type": "task.completed" if state["status"] == "completed" else "task.failed",
+            "type": "task.completed" if current_state.get("status") == "completed" else "task.failed",
             "task_id": task_id,
-            "result": state.get("result"),
-            "status": state["status"],
-            "error": state.get("error"),
-            "timestamp": state["updated_at"],
-            "updated_at": state["updated_at"]
+            "result": current_state.get("result"),
+            "status": current_state.get("status"),
+            "error": current_state.get("error"),
+            "timestamp": current_state.get("updated_at"),
+            "updated_at": current_state.get("updated_at"),
         }
         if ws_sender:
             await ws_sender(completed_message)
         await self.trigger_callback("completed", completed_message)
-        await self._push_completion_to_im(room_id, state)
+        await self._push_completion_to_im(room_id, current_state)
 
-        return state
+        return current_state
+
+    async def _publish_progress(
+        self,
+        room_id: Optional[str],
+        task_id: str,
+        state: AgentState,
+        ws_sender: Callable = None,
+    ) -> None:
+        progress_message = {
+            "type": "task.progress",
+            "task_id": task_id,
+            "step": state.get("current_step"),
+            "message": f"Executing: {state.get('current_step')}",
+            "progress": state.get("progress"),
+            "status": state.get("status"),
+            "timestamp": state.get("updated_at"),
+            "updated_at": state.get("updated_at"),
+        }
+        if ws_sender:
+            await ws_sender(progress_message)
+        await self.trigger_callback("progress", progress_message)
+        await self._push_progress_to_im(room_id, task_id, state)
 
     async def _push_progress_to_im(self, room_id: Optional[str], task_id: str, state: AgentState) -> None:
         if not room_id:
@@ -123,9 +221,9 @@ class AgentOrchestrator:
                 if not lark_bot_service.is_configured:
                     return
                 text = (
-                    f"Agent-Pilot 任务进行中\n"
-                    f"进度: {int(state['progress'] * 100)}%\n"
-                    f"步骤: {state['current_step']}\n"
+                    "Agent-Pilot 任务进行中\n"
+                    f"进度: {int(float(state.get('progress', 0)) * 100)}%\n"
+                    f"步骤: {state.get('current_step')}\n"
                     f"任务: {task_id}"
                 )
                 await lark_bot_service.send_text(room_id, text)
@@ -136,15 +234,15 @@ class AgentOrchestrator:
             await rocket_chat_service.send_progress_update(
                 room_id=room_id,
                 task_id=task_id,
-                step=state["current_step"],
-                progress=state["progress"],
-                message=f"Executing: {state['current_step']}",
+                step=state.get("current_step"),
+                progress=state.get("progress", 0),
+                message=f"Executing: {state.get('current_step')}",
             )
 
-            if state["current_step"] == "plan_workflow" and state.get("workflow_plan"):
+            if state.get("current_step") == "plan_workflow" and state.get("workflow_plan"):
                 await rocket_chat_service.send_plan_card(room_id, state["workflow_plan"])
-        except Exception as e:
-            logger.warning(f"Failed to push Rocket.Chat progress for task {task_id}: {str(e)}")
+        except Exception as exc:
+            logger.warning("Failed to push IM progress for task %s: %s", task_id, str(exc))
 
     async def _push_completion_to_im(self, room_id: Optional[str], state: AgentState) -> None:
         if not room_id or not state.get("result"):
@@ -161,8 +259,8 @@ class AgentOrchestrator:
             if not rocket_chat_service.is_configured:
                 return
             await post_delivery_to_im(room_id, state["result"])
-        except Exception as e:
-            logger.warning(f"Failed to post Rocket.Chat delivery for task {state['task_id']}: {str(e)}")
+        except Exception as exc:
+            logger.warning("Failed to post IM delivery for task %s: %s", state.get("task_id"), str(exc))
 
     def _build_lark_delivery_text(self, state: AgentState) -> str:
         result = state.get("result") or {}
@@ -211,11 +309,11 @@ class AgentOrchestrator:
                     state["task_id"],
                     upload_result.get("error") or upload_result,
                 )
-        except Exception as e:
-            logger.warning(f"Failed to upload/send Lark PPT for task {state['task_id']}: {str(e)}")
+        except Exception as exc:
+            logger.warning("Failed to upload/send Lark PPT for task %s: %s", state["task_id"], str(exc))
 
     async def handle_user_feedback(self, task_id: str, feedback: str) -> AgentState:
-        logger.info(f"Handling feedback for task {task_id}: {feedback}")
+        logger.info("Handling feedback for task %s: %s", task_id, feedback)
 
         return AgentState(
             session_id="",
@@ -234,7 +332,7 @@ class AgentOrchestrator:
             result=None,
             error=None,
             progress=0.8,
-            updated_at=datetime.utcnow().isoformat()
+            updated_at=datetime.utcnow().isoformat(),
         )
 
 
