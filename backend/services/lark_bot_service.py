@@ -531,8 +531,9 @@ def build_delivery_card(
     doc_url: str = None,
     slides_title: str = None,
     slides_count: int = 0,
+    chat_id: str = None,
 ) -> Dict[str, Any]:
-    """构建任务交付卡片。"""
+    """构建任务交付卡片（含交互按钮）。"""
     elements: List[Dict[str, Any]] = [
         {
             "tag": "div",
@@ -553,6 +554,29 @@ def build_delivery_card(
         })
 
     elements.append({"tag": "hr"})
+
+    # Interactive buttons
+    action_value: Dict[str, str] = {"task_id": task_id}
+    if chat_id:
+        action_value["chat_id"] = chat_id
+
+    elements.append({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "确认交付"},
+                "type": "primary",
+                "value": {**action_value, "action": "confirm_delivery"},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "需要修改"},
+                "type": "default",
+                "value": {**action_value, "action": "request_modification"},
+            },
+        ],
+    })
 
     return {
         "config": {"wide_screen_mode": True},

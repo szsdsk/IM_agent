@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,8 @@ from backend.database.models import Document, Event, Session, Slide, Task
 from backend.services.lark_bot_service import lark_bot_service
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
@@ -141,6 +144,56 @@ async def lark_event_callback(payload: Dict[str, Any], background_tasks: Backgro
     message = lark_bot_service.extract_message_event(payload)
     if message and message.get("chat_id") and message.get("text"):
         background_tasks.add_task(_run_lark_message_task, message)
+
+    return {"code": 0, "msg": "ok"}
+
+
+@router.post("/im/lark/card/action")
+async def lark_card_action(payload: Dict[str, Any], background_tasks: BackgroundTasks):
+    """飞书卡片交互回调，处理按钮点击等操作。"""
+    if not lark_bot_service.verify_event(payload):
+        raise HTTPException(status_code=403, detail="Invalid verification token")
+
+    action = payload.get("action", {})
+    action_type = action.get("tag", "")
+    action_value = action.get("value", {})
+    open_id = payload.get("open_id", "")
+    token = payload.get("token", "")
+
+    logger.info(
+        "Lark card action: type=%s, value=%s, user=%s",
+        action_type, action_value, open_id,
+    )
+
+    task_id = action_value.get("task_id", "")
+    action_name = action_value.get("action", "")
+
+    if action_name == "confirm_delivery" and task_id:
+        async with async_session_maker() as db:
+            result = await db.execute(select(Task).where(Task.id == task_id))
+            task = result.scalar_one_or_none()
+            if task:
+                task.status = "completed"
+                task.updated_at = datetime.utcnow()
+                await db.commit()
+
+        chat_id = action_value.get("chat_id", "")
+        if chat_id and lark_bot_service.is_configured:
+            await lark_bot_service.send_text(chat_id, f"任务 {task_id} 已确认交付 ✅")
+
+    elif action_name == "request_modification" and task_id:
+        async with async_session_maker() as db:
+            result = await db.execute(select(Task).where(Task.id == task_id))
+            task = result.scalar_one_or_none()
+            if task:
+                task.status = "pending"
+                task.current_step = "confirm_or_modify"
+                task.updated_at = datetime.utcnow()
+                await db.commit()
+
+        chat_id = action_value.get("chat_id", "")
+        if chat_id and lark_bot_service.is_configured:
+            await lark_bot_service.send_text(chat_id, f"任务 {task_id} 已标记为需修改，请发送修改意见。")
 
     return {"code": 0, "msg": "ok"}
 
