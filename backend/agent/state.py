@@ -14,6 +14,7 @@ class AgentState(TypedDict, total=False):
     context_messages: List[Dict[str, Any]]
     intent_analysis: Optional[Dict[str, Any]]
     content_types: List[str]
+    presentation_scene: Optional[str]
     audience: Optional[str]
     constraints: List[str]
     pending_questions: List[str]
@@ -53,6 +54,7 @@ def create_initial_state(
         context_messages=context_messages or [],
         intent_analysis=None,
         content_types=[],
+        presentation_scene=None,
         audience=None,
         constraints=[],
         pending_questions=[],

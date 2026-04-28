@@ -2,13 +2,12 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from backend.agent.orchestrator import agent_orchestrator
 from backend.api.schemas import (
     CreateSessionRequest,
@@ -20,10 +19,12 @@ from backend.api.schemas import (
     SlidesResponse,
     TaskConfirmRequest,
     TaskResponse,
+    VoiceTranscriptionResponse,
 )
 from backend.database.connection import async_session_maker, get_db
 from backend.database.models import Document, Event, Session, Slide, Task
 from backend.services.lark_bot_service import lark_bot_service
+from backend.services.speech_service import speech_service
 
 router = APIRouter()
 
@@ -60,21 +61,209 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _extract_result_payload(task: Task) -> Dict[str, Any]:
+    if isinstance(task.result_json, dict):
+        result = task.result_json.get("result")
+        if isinstance(result, dict):
+            return result
+    return {}
+
+
+def _looks_like_feedback(content: str) -> bool:
+    text = (content or "").lower()
+    markers = [
+        "改",
+        "修改",
+        "调整",
+        "优化",
+        "替换",
+        "删掉",
+        "删除",
+        "增加",
+        "补充",
+        "把第",
+        "第",
+        "page",
+        "slide",
+        "ppt",
+        "文档",
+        "doc",
+    ]
+    return any(marker in text for marker in markers)
+
+
+async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, Any]) -> None:
+    task.status = state["status"]
+    task.current_step = state["current_step"]
+    task.result_json = {
+        "progress": state["progress"],
+        "result": state.get("result"),
+        "error": state.get("error"),
+        "im_provider": task.result_json.get("im_provider") if isinstance(task.result_json, dict) else None,
+        "chat_id": task.result_json.get("chat_id") if isinstance(task.result_json, dict) else None,
+    }
+    task.updated_at = datetime.utcnow()
+
+    if state.get("doc_content"):
+        existing_doc_result = await db.execute(select(Document).where(Document.task_id == task.id))
+        document = existing_doc_result.scalar_one_or_none()
+        if not document:
+            document = Document(task_id=task.id)
+            db.add(document)
+            document.version = 1
+        else:
+            document.version = (document.version or 1) + 1
+        document.content = state["doc_content"].get("content")
+        document.updated_at = datetime.utcnow()
+
+    if state.get("slides_content"):
+        existing_slide_result = await db.execute(select(Slide).where(Slide.task_id == task.id))
+        slide = existing_slide_result.scalar_one_or_none()
+        if not slide:
+            slide = Slide(task_id=task.id)
+            db.add(slide)
+        slide.slides_json = state["slides_content"].get("slides", [])
+        slide.file_path = state["slides_content"].get("file_path")
+        slide.updated_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(task)
+
+
+async def _find_feedback_target(
+    db: AsyncSession,
+    session_id: str,
+    explicit_task_id: Optional[str],
+    content: str,
+) -> Optional[Task]:
+    if explicit_task_id:
+        result = await db.execute(select(Task).where(Task.id == explicit_task_id, Task.session_id == session_id))
+        return result.scalar_one_or_none()
+
+    if not _looks_like_feedback(content):
+        return None
+
+    result = await db.execute(
+        select(Task)
+        .where(Task.session_id == session_id)
+        .order_by(Task.updated_at.desc())
+    )
+    for task in result.scalars().all():
+        payload = _extract_result_payload(task)
+        if payload and task.status in {"completed", "pending"}:
+            return task
+    return None
+
+
 async def _run_lark_message_task(message: Dict[str, Any]) -> None:
     """把飞书消息转换为一次独立的 Agent 任务。"""
-    async with async_session_maker() as db:
-        session = Session(
-            id=str(uuid.uuid4()),
-            user_id=message.get("user_id"),
-            status="active",
+    text = (message.get("text") or "").strip()
+    voice_resource = message.get("voice_resource")
+
+    if not text and voice_resource:
+        message_type = str((voice_resource or {}).get("message_type") or "").lower()
+        resource_type = "audio" if message_type in {"audio", "voice"} else "media" if message_type == "media" else "file"
+        download_result = await lark_bot_service.download_message_resource(
+            message_id=message.get("message_id", ""),
+            file_key=voice_resource.get("file_key", ""),
+            resource_type=resource_type,
         )
+        if not download_result.get("success"):
+            if message.get("chat_id") and lark_bot_service.is_configured:
+                await lark_bot_service.send_text(
+                    message["chat_id"],
+                    f"语音文件下载失败：{download_result.get('error') or 'unknown error'}",
+                )
+            return
+
+        transcription = await speech_service.transcribe(
+            audio_bytes=download_result.get("content") or b"",
+            filename=f"feishu-{message.get('message_id', 'voice')}.ogg",
+            content_type=download_result.get("content_type"),
+            language="zh",
+        )
+        if not transcription.get("success"):
+            if message.get("chat_id") and lark_bot_service.is_configured:
+                await lark_bot_service.send_text(
+                    message["chat_id"],
+                    f"语音转写失败：{transcription.get('error') or 'unknown error'}",
+                )
+            return
+
+        text = transcription["text"]
+        message["text"] = text
+        if message.get("chat_id") and lark_bot_service.is_configured:
+            await lark_bot_service.send_text(message["chat_id"], f"语音已转写：{text}")
+
+    if not text:
+        return
+
+    async with async_session_maker() as db:
+        session_result = await db.execute(
+            select(Session)
+            .where(Session.user_id == message.get("user_id"))
+            .order_by(Session.updated_at.desc())
+        )
+        session = session_result.scalar_one_or_none()
+        if not session:
+            session = Session(
+                id=str(uuid.uuid4()),
+                user_id=message.get("user_id"),
+                status="active",
+            )
+            db.add(session)
+            await db.commit()
+            await db.refresh(session)
+
+        async def ws_sender(data: dict):
+            await manager.broadcast({
+                **data,
+                "session_id": session.id,
+                "source": "lark",
+            })
+
+        feedback_target = await _find_feedback_target(
+            db=db,
+            session_id=session.id,
+            explicit_task_id=None,
+            content=text,
+        )
+
+        if feedback_target:
+            await manager.broadcast({
+                "type": "agent.message",
+                "task_id": feedback_target.id,
+                "session_id": session.id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {
+                    "content": f"收到修改意见：{text}",
+                    "source": "lark",
+                    "chat_id": message.get("chat_id"),
+                },
+            })
+            state = await agent_orchestrator.handle_user_feedback(
+                session_id=session.id,
+                task_id=feedback_target.id,
+                feedback=text,
+                base_result=_extract_result_payload(feedback_target),
+                user_id=message.get("user_id"),
+                room_id=message.get("chat_id"),
+                ws_sender=ws_sender,
+            )
+            feedback_target.result_json = {
+                "im_provider": "lark",
+                "chat_id": message.get("chat_id"),
+                "message_id": message.get("message_id"),
+            }
+            await _persist_task_outputs(db, feedback_target, state)
+            return
+
         task = Task(
             id=str(uuid.uuid4()),
             session_id=session.id,
-            intent=message["text"],
+            intent=text,
             status="pending",
         )
-        db.add(session)
         db.add(task)
         await db.commit()
         await db.refresh(task)
@@ -85,40 +274,27 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             "session_id": session.id,
             "timestamp": datetime.utcnow().isoformat(),
             "data": {
-                "content": f"来自飞书的需求：{message['text']}",
+                "content": f"来自飞书的需求：{text}",
                 "source": "lark",
                 "chat_id": message.get("chat_id"),
             },
         })
 
-        async def ws_sender(data: dict):
-            await manager.broadcast({
-                **data,
-                "session_id": session.id,
-                "source": "lark",
-            })
-
         state = await agent_orchestrator.execute_workflow(
             session_id=session.id,
             task_id=task.id,
-            intent=message["text"],
+            intent=text,
             user_id=message.get("user_id"),
             room_id=message.get("chat_id"),
             ws_sender=ws_sender,
         )
 
-        task.status = state["status"]
-        task.current_step = state["current_step"]
         task.result_json = {
-            "progress": state["progress"],
-            "result": state.get("result"),
-            "error": state.get("error"),
             "im_provider": "lark",
             "chat_id": message.get("chat_id"),
             "message_id": message.get("message_id"),
         }
-        task.updated_at = datetime.utcnow()
-        await db.commit()
+        await _persist_task_outputs(db, task, state)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -142,7 +318,7 @@ async def lark_event_callback(payload: Dict[str, Any], background_tasks: Backgro
         raise HTTPException(status_code=403, detail="Invalid Lark verification token")
 
     message = lark_bot_service.extract_message_event(payload)
-    if message and message.get("chat_id") and message.get("text"):
+    if message and message.get("chat_id") and (message.get("text") or message.get("voice_resource")):
         background_tasks.add_task(_run_lark_message_task, message)
 
     return {"code": 0, "msg": "ok"}
@@ -196,6 +372,29 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
             await lark_bot_service.send_text(chat_id, f"任务 {task_id} 已标记为需修改，请发送修改意见。")
 
     return {"code": 0, "msg": "ok"}
+
+
+@router.post("/voice/transcriptions", response_model=VoiceTranscriptionResponse)
+async def transcribe_voice(
+    file: UploadFile = File(...),
+    language: str = "zh",
+):
+    audio_bytes = await file.read()
+    result = await speech_service.transcribe(
+        audio_bytes=audio_bytes,
+        filename=file.filename or "voice.ogg",
+        content_type=file.content_type,
+        language=language,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Voice transcription failed.")
+    return VoiceTranscriptionResponse(
+        success=True,
+        text=result.get("text"),
+        model=result.get("model"),
+        provider=result.get("provider"),
+    )
+
 
 
 @router.post("/sessions", response_model=SessionResponse)
@@ -256,16 +455,6 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    task = Task(
-        id=str(uuid.uuid4()),
-        session_id=session_id,
-        intent=request.content,
-        status="pending",
-    )
-    db.add(task)
-    await db.commit()
-    await db.refresh(task)
-
     async def ws_sender(data: dict):
         await manager.send_to_session(session_id, data)
         if request.room_id:
@@ -276,18 +465,39 @@ async def send_message(
                 "room_id": request.room_id,
             })
 
-    if request.room_id:
-        await manager.broadcast({
-            "type": "agent.message",
-            "task_id": task.id,
-            "session_id": session_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "data": {
-                "content": f"来自飞书的需求：{request.content}",
-                "source": "lark",
-                "chat_id": request.room_id,
-            },
-        })
+    feedback_target = await _find_feedback_target(
+        db=db,
+        session_id=session_id,
+        explicit_task_id=request.feedback_task_id,
+        content=request.content,
+    )
+
+    if feedback_target:
+        state = await agent_orchestrator.handle_user_feedback(
+            session_id=session_id,
+            task_id=feedback_target.id,
+            feedback=request.content,
+            base_result=_extract_result_payload(feedback_target),
+            user_id=request.user_id,
+            room_id=request.room_id or (
+                feedback_target.result_json.get("chat_id")
+                if isinstance(feedback_target.result_json, dict)
+                else None
+            ),
+            ws_sender=ws_sender,
+        )
+        await _persist_task_outputs(db, feedback_target, state)
+        return feedback_target
+
+    task = Task(
+        id=str(uuid.uuid4()),
+        session_id=session_id,
+        intent=request.content,
+        status="pending",
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
 
     state = await agent_orchestrator.execute_workflow(
         session_id=session_id,
@@ -295,22 +505,13 @@ async def send_message(
         intent=request.content,
         user_id=request.user_id,
         room_id=request.room_id,
+        presentation_scene=request.presentation_scene,
         ws_sender=ws_sender,
     )
 
-    task.status = state["status"]
-    task.current_step = state["current_step"]
-    task.result_json = {
-        "progress": state["progress"],
-        "result": state.get("result"),
-        "error": state.get("error"),
-        "im_provider": "lark" if request.room_id else None,
-        "chat_id": request.room_id,
-    }
-    task.updated_at = datetime.utcnow()
-    await db.commit()
-
-    await db.refresh(task)
+    if request.room_id:
+        task.result_json = {"im_provider": "lark", "chat_id": request.room_id}
+    await _persist_task_outputs(db, task, state)
     return task
 
 
@@ -336,9 +537,24 @@ async def confirm_task(
 
     if request.confirmed:
         task.status = "completed"
+        task.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(task)
+        return task
+
+    if request.feedback:
+        state = await agent_orchestrator.handle_user_feedback(
+            session_id=task.session_id,
+            task_id=task.id,
+            feedback=request.feedback,
+            base_result=_extract_result_payload(task),
+        )
+        await _persist_task_outputs(db, task, state)
+        return task
     else:
         task.status = "pending"
         task.current_step = "confirm_or_modify"
+        task.updated_at = datetime.utcnow()
 
     await db.commit()
     await db.refresh(task)
@@ -392,11 +608,37 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             if data.get("type") == "ping":
                 await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
             elif data.get("type") == "message":
-                request = SendMessageRequest(content=data.get("content", ""))
+                request = SendMessageRequest(
+                    content=data.get("content", ""),
+                    presentation_scene=data.get("presentation_scene"),
+                )
                 async with async_session_maker() as session_result:
                     result = await session_result.execute(select(Session).where(Session.id == session_id))
                     session = result.scalar_one_or_none()
                     if session:
+                        async def ws_sender(msg: dict):
+                            await websocket.send_json(msg)
+
+                        feedback_target = await _find_feedback_target(
+                            db=session_result,
+                            session_id=session_id,
+                            explicit_task_id=request.feedback_task_id,
+                            content=request.content,
+                        )
+
+                        if feedback_target:
+                            state = await agent_orchestrator.handle_user_feedback(
+                                session_id=session_id,
+                                task_id=feedback_target.id,
+                                feedback=request.content,
+                                base_result=_extract_result_payload(feedback_target),
+                                user_id=request.user_id,
+                                room_id=request.room_id,
+                                ws_sender=ws_sender,
+                            )
+                            await _persist_task_outputs(session_result, feedback_target, state)
+                            continue
+
                         task = Task(
                             id=str(uuid.uuid4()),
                             session_id=session_id,
@@ -407,27 +649,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         await session_result.commit()
                         await session_result.refresh(task)
 
-                        async def ws_sender(msg: dict):
-                            await websocket.send_json(msg)
-
                         state = await agent_orchestrator.execute_workflow(
                             session_id=session_id,
                             task_id=task.id,
                             intent=request.content,
                             user_id=request.user_id,
                             room_id=request.room_id,
+                            presentation_scene=request.presentation_scene,
                             ws_sender=ws_sender,
                         )
 
-                        task.status = state["status"]
-                        task.current_step = state["current_step"]
-                        task.result_json = {
-                            "progress": state["progress"],
-                            "result": state.get("result"),
-                            "error": state.get("error"),
-                        }
-                        task.updated_at = datetime.utcnow()
-                        await session_result.commit()
+                        await _persist_task_outputs(session_result, task, state)
     except WebSocketDisconnect:
         manager.disconnect(websocket, session_id)
     except Exception:

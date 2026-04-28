@@ -3,6 +3,8 @@ import logging
 import mimetypes
 import re
 import time
+import uuid
+from base64 import b64encode
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -218,6 +220,105 @@ class LarkBotService:
             "upload": upload_result,
         }
 
+
+    async def download_message_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str = "file",
+    ) -> Dict[str, Any]:
+        """Download a Feishu message resource, such as a voice attachment."""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+        if not message_id or not file_key:
+            return {"success": False, "error": "Missing message_id or file_key."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        response = await self.client.get(
+            f"/im/v1/messages/{message_id}/resources/{file_key}",
+            params={"type": resource_type},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        return {
+            "success": True,
+            "content": response.content,
+            "content_type": response.headers.get("content-type", "application/octet-stream"),
+        }
+
+    async def recognize_speech_file(
+        self,
+        audio_bytes: bytes,
+        file_id: Optional[str] = None,
+        audio_format: Optional[str] = None,
+        engine_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Recognize a short audio file with Feishu speech_to_text ASR."""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+        if not audio_bytes:
+            return {"success": False, "error": "Audio file is empty."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        safe_file_id = re.sub(r"[^0-9A-Za-z_]", "_", (file_id or "").strip())
+        if len(safe_file_id) != 16:
+            safe_file_id = uuid.uuid4().hex[:16]
+
+        payload = {
+            "speech": {
+                "speech": b64encode(audio_bytes).decode("ascii"),
+            },
+            "config": {
+                "file_id": safe_file_id,
+                "format": audio_format or settings.FEISHU_ASR_FORMAT,
+                "engine_type": engine_type or settings.FEISHU_ASR_ENGINE_TYPE,
+            },
+        }
+
+        try:
+            response = await self.client.post(
+                "/speech_to_text/v1/speech/file_recognize",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            if exc.response is not None:
+                detail = exc.response.text[:1000]
+            error_msg = (
+                f"HTTP {exc.response.status_code if exc.response is not None else 'error'}; "
+                f"format={payload['config']['format']}; engine_type={payload['config']['engine_type']}; "
+                f"detail={detail or str(exc)}"
+            )
+            return {"success": False, "error": error_msg}
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": (
+                    f"Unexpected ASR error; format={payload['config']['format']}; "
+                    f"engine_type={payload['config']['engine_type']}; detail={str(exc)}"
+                ),
+            }
+
+        text = str(((data.get("data") or {}).get("recognition_text")) or "").strip()
+        return {
+            "success": data.get("code") == 0 and bool(text),
+            "text": text,
+            "provider": "feishu_asr",
+            "model": payload["config"]["engine_type"],
+            "error": None if data.get("code") == 0 else data.get("msg"),
+            "raw": data,
+        }
+
+
     async def send_card(self, chat_id: str, card: Dict[str, Any]) -> Dict[str, Any]:
         """发送飞书交互卡片消息。"""
         if not self.is_configured:
@@ -273,10 +374,11 @@ class LarkBotService:
             return None
 
         text = self._extract_text(message)
-        if not text:
+        voice_resource = self._extract_voice_resource(message)
+        if not text and not voice_resource:
             return None
 
-        if settings.LARK_BOT_REQUIRE_MENTION and message.get("chat_type") == "group":
+        if text and settings.LARK_BOT_REQUIRE_MENTION and message.get("chat_type") == "group":
             mentions = message.get("mentions") or []
             if not mentions:
                 return None
@@ -291,6 +393,7 @@ class LarkBotService:
             "chat_id": message.get("chat_id"),
             "chat_type": message.get("chat_type"),
             "text": text.strip(),
+            "voice_resource": voice_resource,
             "user_id": self._sender_id(sender),
         }
 
@@ -304,6 +407,26 @@ class LarkBotService:
             return str(parsed.get("text") or "")
         except (json.JSONDecodeError, TypeError):
             return str(content)
+
+    def _extract_voice_resource(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if message.get("message_type") not in {"audio", "voice", "media"}:
+            return None
+
+        content = message.get("content") or ""
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        file_key = parsed.get("file_key") or parsed.get("key") or parsed.get("fileKey")
+        if not file_key:
+            return None
+
+        return {
+            "file_key": file_key,
+            "duration": parsed.get("duration") or parsed.get("duration_ms"),
+            "message_type": message.get("message_type"),
+        }
 
     def _strip_mentions(self, text: str, mentions: Any) -> str:
         cleaned = text

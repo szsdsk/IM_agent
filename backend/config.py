@@ -16,6 +16,17 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.minimaxi.com/v1"
     LLM_MODEL: str = "abab6.5s-chat"
 
+    # Speech-to-text configuration. Defaults to the same OpenAI-compatible
+    # provider as chat, but can be overridden when the ASR endpoint differs.
+    ASR_API_KEY: Optional[str] = None
+    ASR_BASE_URL: Optional[str] = None
+    ASR_MODEL: str = "whisper-1"
+    VOICE_TRANSCRIPTION_ENABLED: bool = True
+    FEISHU_ASR_ENABLED: bool = True
+    FEISHU_ASR_FORMAT: str = "pcm"
+    FEISHU_ASR_ENGINE_TYPE: str = "16k_auto"
+
+
     # IM provider selector. The current demo defaults to Feishu/Lark bot events.
     IM_PROVIDER: str = "lark"
 

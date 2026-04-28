@@ -25,6 +25,28 @@ class PPTTool(BaseTool):
         )
         os.makedirs(self._output_dir, exist_ok=True)
 
+
+    @staticmethod
+    def _apply_template_profile(deck) -> None:
+        profile = (deck.metadata or {}).get("template_profile") or (deck.metadata or {}).get("presentation_scene")
+        template_map = {
+            "management_briefing": {"theme": "business_blue", "title_prefix": "管理汇报"},
+            "project_review": {"theme": "tech_dark", "title_prefix": "项目评审"},
+            "proposal_pitch": {"theme": "minimal", "title_prefix": "方案提案"},
+            "postmortem": {"theme": "tech_dark", "title_prefix": "复盘总结"},
+            "training": {"theme": "minimal", "title_prefix": "培训讲解"},
+        }
+        template = template_map.get(profile or "", {"theme": deck.theme, "title_prefix": ""})
+        if not deck.theme:
+            deck.theme = template["theme"]
+        elif profile in template_map:
+            deck.theme = template["theme"]
+        if template["title_prefix"] and deck.slides:
+            first_slide = deck.slides[0]
+            if not any(prefix in (first_slide.title or "") for prefix in ["管理汇报", "项目评审", "方案提案", "复盘总结", "培训讲解"]):
+                first_slide.title = f"{template['title_prefix']} · {first_slide.title}"
+
+
     def _build_langchain_tool(self):
         from langchain_core.tools import StructuredTool
 
@@ -151,6 +173,8 @@ class PPTTool(BaseTool):
                         layout=s.get("layout", "content"),
                         bullets=s.get("bullets", []),
                     )
+
+            self._apply_template_profile(deck)
 
             renderer = PptxGenRenderer(self._output_dir)
             result = await renderer.render(deck, filename=f"{task_id}.pptx")

@@ -13,6 +13,7 @@ from backend.services.lark_bot_service import (
     build_progress_card,
     lark_bot_service,
 )
+from backend.services.llm_service import revise_deck_spec, revise_doc_content
 from backend.services.rocket_chat_service import (
     fetch_im_context,
     post_delivery_to_im,
@@ -146,6 +147,7 @@ class AgentOrchestrator:
         intent: str,
         user_id: Optional[str] = None,
         room_id: Optional[str] = None,
+        presentation_scene: Optional[str] = None,
         ws_sender: Callable = None,
     ) -> AgentState:
         context_messages: List[Dict[str, Any]] = []
@@ -163,6 +165,7 @@ class AgentOrchestrator:
             room_id=room_id,
             context_messages=context_messages,
         )
+        state["presentation_scene"] = presentation_scene
 
         current_state: AgentState = state
         try:
@@ -358,28 +361,190 @@ class AgentOrchestrator:
         except Exception as exc:
             logger.warning("Failed to upload/send Lark PPT for task %s: %s", state["task_id"], str(exc))
 
-    async def handle_user_feedback(self, task_id: str, feedback: str) -> AgentState:
+    async def handle_user_feedback(
+        self,
+        session_id: str,
+        task_id: str,
+        feedback: str,
+        base_result: Dict[str, Any],
+        user_id: Optional[str] = None,
+        room_id: Optional[str] = None,
+        ws_sender: Callable = None,
+    ) -> AgentState:
         logger.info("Handling feedback for task %s: %s", task_id, feedback)
 
-        return AgentState(
-            session_id="",
+        state = create_initial_state(
+            session_id=session_id,
             task_id=task_id,
-            intent="",
-            user_id=None,
-            room_id=None,
-            status="waiting",
-            current_step="confirm_or_modify",
-            messages=[],
+            intent=feedback,
+            user_id=user_id,
+            room_id=room_id,
             context_messages=[],
-            doc_content=None,
-            slides_content=None,
-            extracted_tasks=None,
-            workflow_plan=None,
-            result=None,
-            error=None,
-            progress=0.8,
-            updated_at=datetime.utcnow().isoformat(),
         )
+        state["status"] = "running"
+        state["messages"] = []
+        state["progress"] = 0.0
+
+        async def publish(step: str, progress: float, message: str) -> None:
+            state["current_step"] = step
+            state["progress"] = progress
+            state["updated_at"] = datetime.utcnow().isoformat()
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+            state["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": message,
+                    "timestamp": state["updated_at"],
+                    "step": step,
+                }
+            )
+
+        try:
+            await publish("confirm_or_modify", 0.1, f"Processing feedback: {feedback}")
+
+            base_doc = base_result.get("document") or base_result.get("doc") or {}
+            base_slides = base_result.get("slides") or base_result.get("deck") or {}
+            should_update_doc = self._should_update_doc(feedback, base_doc, base_slides)
+            should_update_slides = self._should_update_slides(feedback, base_doc, base_slides)
+
+            if isinstance(base_doc, dict) and should_update_doc:
+                await publish("generate_doc", 0.4, "Regenerating document with feedback")
+                title = base_doc.get("title") or f"Task {task_id} document"
+                revised_doc = await revise_doc_content(
+                    title=title,
+                    original_content=base_doc.get("content") or base_doc.get("preview") or "",
+                    feedback=feedback,
+                )
+                doc_result = await ToolFactory.invoke_tool(
+                    "DocTool",
+                    {
+                        "action": "create_doc",
+                        "task_id": task_id,
+                        "title": title,
+                        "content": revised_doc,
+                    },
+                )
+                if not doc_result.get("success"):
+                    raise RuntimeError(doc_result.get("error") or "Failed to regenerate document")
+                state["doc_content"] = {
+                    "doc_id": doc_result.get("doc_id"),
+                    "title": title,
+                    "content": revised_doc,
+                    "content_preview": revised_doc[:500] + "..." if len(revised_doc) > 500 else revised_doc,
+                    "doc_url": doc_result.get("doc_url"),
+                }
+            elif isinstance(base_doc, dict) and base_doc:
+                state["doc_content"] = {
+                    "doc_id": base_doc.get("doc_id"),
+                    "title": base_doc.get("title"),
+                    "content": base_doc.get("content"),
+                    "content_preview": base_doc.get("preview") or base_doc.get("content"),
+                    "doc_url": base_doc.get("doc_url"),
+                }
+
+            if isinstance(base_slides, dict) and should_update_slides:
+                await publish("generate_slides", 0.75, "Regenerating presentation with feedback")
+                slides = base_slides.get("slides") or []
+                revised_spec = await revise_deck_spec(
+                    title=base_slides.get("title") or state.get("doc_content", {}).get("title") or f"Task {task_id} deck",
+                    original_slides=slides,
+                    feedback=feedback,
+                    audience="management",
+                    doc_content=(state.get("doc_content") or {}).get("content", ""),
+                )
+                result = await ToolFactory.invoke_tool(
+                    "PPTTool",
+                    {
+                        "action": "create_slides",
+                        "task_id": task_id,
+                        "title": revised_spec.get("title"),
+                        "slides": revised_spec.get("slides", []),
+                    },
+                )
+                if not result.get("success"):
+                    raise RuntimeError(result.get("error") or "Failed to regenerate slides")
+                state["slides_content"] = {
+                    "slide_id": result.get("slide_id"),
+                    "title": revised_spec.get("title"),
+                    "slides": revised_spec.get("slides", []),
+                    "file_path": result.get("download_url") or result.get("file_path"),
+                }
+            elif isinstance(base_slides, dict) and base_slides:
+                state["slides_content"] = {
+                    "slide_id": base_slides.get("slide_id"),
+                    "title": base_slides.get("title"),
+                    "slides": base_slides.get("slides", []),
+                    "file_path": base_slides.get("file_path"),
+                }
+
+            if base_result.get("canvas"):
+                state["canvas_content"] = {"canvas_id": base_result["canvas"].get("canvas_id")}
+
+            state = await nodes.deliver_result(state)
+            state["updated_at"] = datetime.utcnow().isoformat()
+
+            completed_message = {
+                "type": "task.completed" if state.get("status") == "completed" else "task.failed",
+                "task_id": task_id,
+                "result": state.get("result"),
+                "status": state.get("status"),
+                "error": state.get("error"),
+                "timestamp": state.get("updated_at"),
+                "updated_at": state.get("updated_at"),
+            }
+            if ws_sender:
+                await ws_sender(completed_message)
+            await self.trigger_callback("completed", completed_message)
+            await self._push_completion_to_im(room_id, state)
+            try:
+                await sync_service.broadcast_delivery(
+                    session_id=session_id,
+                    task_id=task_id,
+                    delivery=state.get("result") or {},
+                )
+            except Exception:
+                pass
+            return state
+        except Exception as exc:
+            logger.exception("Feedback handling failed for task %s", task_id)
+            state["error"] = str(exc)
+            state["status"] = "failed"
+            state["updated_at"] = datetime.utcnow().isoformat()
+            failed_message = {
+                "type": "task.failed",
+                "task_id": task_id,
+                "result": None,
+                "status": "failed",
+                "error": state["error"],
+                "timestamp": state["updated_at"],
+                "updated_at": state["updated_at"],
+            }
+            if ws_sender:
+                await ws_sender(failed_message)
+            await self.trigger_callback("completed", failed_message)
+            return state
+
+    @staticmethod
+    def _should_update_doc(feedback: str, base_doc: Dict[str, Any], base_slides: Dict[str, Any]) -> bool:
+        text = feedback.lower()
+        doc_markers = ["doc", "document", "文档", "需求", "prd", "说明", "总结"]
+        slide_markers = ["ppt", "slide", "slides", "deck", "页", "第", "演示", "汇报"]
+        if any(marker in text for marker in doc_markers):
+            return True
+        if any(marker in text for marker in slide_markers):
+            return False
+        return bool(base_doc) and not base_slides
+
+    @staticmethod
+    def _should_update_slides(feedback: str, base_doc: Dict[str, Any], base_slides: Dict[str, Any]) -> bool:
+        text = feedback.lower()
+        slide_markers = ["ppt", "slide", "slides", "deck", "页", "第", "演示", "汇报"]
+        doc_markers = ["doc", "document", "文档", "需求", "prd", "说明", "总结"]
+        if any(marker in text for marker in slide_markers):
+            return True
+        if any(marker in text for marker in doc_markers):
+            return False
+        return bool(base_slides)
 
 
 agent_orchestrator = AgentOrchestrator()

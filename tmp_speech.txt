@@ -1,0 +1,128 @@
+﻿import logging
+from typing import Any, Dict, Optional
+
+import httpx
+
+from backend.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class SpeechService:
+    """Speech-to-text adapter.
+
+    Feishu ASR is preferred for bot voice commands. OpenAI-compatible ASR remains
+    as a fallback for local uploads or environments without Feishu ASR enabled.
+    """
+
+    def __init__(self):
+        self.api_key = settings.ASR_API_KEY or settings.OPENAI_API_KEY
+        self.base_url = (settings.ASR_BASE_URL or settings.OPENAI_BASE_URL).rstrip("/")
+        self.model = settings.ASR_MODEL
+        self.enabled = settings.VOICE_TRANSCRIPTION_ENABLED
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.enabled and self.api_key and self.base_url and self.model)
+
+    async def transcribe(
+        self,
+        audio_bytes: bytes,
+        filename: str = "voice.ogg",
+        content_type: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.enabled:
+            return {"success": False, "error": "Voice transcription is disabled."}
+        if not audio_bytes:
+            return {"success": False, "error": "Audio file is empty."}
+
+        if settings.FEISHU_ASR_ENABLED:
+            feishu_result = await self._transcribe_with_feishu(audio_bytes, filename, content_type)
+            if feishu_result.get("success"):
+                return feishu_result
+            logger.warning("Feishu ASR failed, trying external ASR fallback: %s", feishu_result.get("error"))
+
+        if not self.api_key:
+            return {"success": False, "error": "ASR_API_KEY or OPENAI_API_KEY is not configured."}
+
+        url = f"{self.base_url}/audio/transcriptions"
+        data: Dict[str, str] = {"model": self.model}
+        if language:
+            data["language"] = language
+
+        files = {
+            "file": (
+                filename or "voice.ogg",
+                audio_bytes,
+                content_type or "application/octet-stream",
+            )
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    data=data,
+                    files=files,
+                )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:1000] if exc.response is not None else str(exc)
+            logger.warning("Voice transcription failed with HTTP error: %s", detail)
+            return {"success": False, "error": detail}
+        except Exception as exc:
+            logger.exception("Voice transcription failed")
+            return {"success": False, "error": str(exc)}
+
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return {"success": False, "error": "ASR response did not contain text.", "raw": payload}
+
+        return {
+            "success": True,
+            "text": text,
+            "model": payload.get("model") or self.model,
+            "provider": "openai_compatible_asr",
+            "raw": payload,
+        }
+
+    async def _transcribe_with_feishu(
+        self,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: Optional[str],
+    ) -> Dict[str, Any]:
+        try:
+            from backend.services.lark_bot_service import lark_bot_service
+
+            if not lark_bot_service.is_configured:
+                return {"success": False, "error": "Feishu ASR is enabled but Lark OpenAPI is not configured."}
+
+            return await lark_bot_service.recognize_speech_file(
+                audio_bytes=audio_bytes,
+                file_id=filename,
+                audio_format=self._guess_feishu_format(filename, content_type),
+            )
+        except Exception as exc:
+            logger.exception("Feishu ASR failed")
+            return {"success": False, "error": str(exc)}
+
+    def _guess_feishu_format(self, filename: str, content_type: Optional[str]) -> str:
+        value = f"{filename or ''} {content_type or ''}".lower()
+        if "wav" in value:
+            return "wav"
+        if "pcm" in value:
+            return "pcm"
+        if "mp3" in value or "mpeg" in value:
+            return "mp3"
+        if "m4a" in value or "mp4" in value:
+            return "m4a"
+        if "opus" in value or "ogg" in value:
+            return "opus"
+        return settings.FEISHU_ASR_FORMAT
+
+
+speech_service = SpeechService()

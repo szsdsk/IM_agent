@@ -148,8 +148,12 @@ async def parse_intent(state: AgentState) -> AgentState:
 
         state["intent_analysis"] = intent_result
         state["content_types"] = intent_result.get("content_types", ["doc", "slides"])
+        state["presentation_scene"] = state.get("presentation_scene") or intent_result.get("presentation_scene")
         state["audience"] = intent_result.get("audience", "管理层")
         state["constraints"] = intent_result.get("constraints", [])
+
+        if state.get("presentation_scene"):
+            intent_result["presentation_scene"] = state["presentation_scene"]
 
         analysis_text = (
             "**需求分析完成**\n\n"
@@ -157,12 +161,13 @@ async def parse_intent(state: AgentState) -> AgentState:
             f"- 生成内容: {', '.join(state['content_types'])}\n"
             f"- 目标受众: {state['audience']}\n"
         )
+        if state.get("presentation_scene"):
+            analysis_text += f"- 演示场景: {state['presentation_scene']}\n"
         if intent_result.get("questions"):
             analysis_text += f"\n需要确认: {', '.join(intent_result['questions'])}"
             state["pending_questions"] = intent_result["questions"]
 
         _append_message(state, "assistant", analysis_text, "parse_intent")
-
     except Exception as exc:
         logger.exception("Error in parse_intent")
         _append_message(state, "assistant", f"分析出错: {str(exc)}", "parse_intent")
@@ -178,6 +183,7 @@ async def plan_workflow(state: AgentState) -> AgentState:
     try:
         context = {
             "content_types": state.get("content_types", []),
+            "presentation_scene": state.get("presentation_scene"),
             "audience": state.get("audience", "管理层"),
             "constraints": state.get("constraints", []),
         }
@@ -329,11 +335,13 @@ async def generate_slides(state: AgentState) -> AgentState:
     try:
         doc_content = (state.get("doc_content") or {}).get("content", state["intent"])
         audience = state.get("audience", "管理层")
+        presentation_scene = state.get("presentation_scene")
 
         deck_spec = await generate_deck_spec(
             title=state.get("intent", "演示稿"),
             doc_content=doc_content,
             audience=audience,
+            presentation_scene=presentation_scene,
         )
         state["deck_spec"] = deck_spec
 
@@ -350,6 +358,7 @@ async def generate_slides(state: AgentState) -> AgentState:
                 "task_id": state["task_id"],
                 "title": deck_spec.get("title", state["intent"]),
                 "slides": slides,
+                "deck_spec": deck_spec,
             },
         )
 

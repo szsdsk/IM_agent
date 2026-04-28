@@ -1,4 +1,4 @@
-import type { Session, Task, Document, Slide, Message, Health } from '../types'
+import type { Session, Task, Document, Slide, Message, Health, PresentationScene } from '../types'
 
 const API_BASE = '/api'
 
@@ -33,10 +33,15 @@ export const api = {
     return fetchAPI<Message[]>(`/sessions/${sessionId}/messages`)
   },
 
-  async sendMessage(sessionId: string, content: string, userId?: string): Promise<Task> {
+  async sendMessage(
+    sessionId: string,
+    content: string,
+    userId?: string,
+    presentationScene?: PresentationScene
+  ): Promise<Task> {
     return fetchAPI<Task>(`/sessions/${sessionId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content, user_id: userId }),
+      body: JSON.stringify({ content, user_id: userId, presentation_scene: presentationScene }),
     })
   },
 
@@ -62,5 +67,23 @@ export const api = {
   // 前端只用 health 判断后端是否存活。
   async healthCheck(): Promise<Health> {
     return fetchAPI<Health>('/health')
+  },
+
+  async transcribeVoice(
+    audioBlob: Blob,
+    language = 'zh'
+  ): Promise<{ success: boolean; text?: string; error?: string; provider?: string }> {
+    const formData = new FormData()
+    const fileName = audioBlob.type.includes('pcm') ? 'voice.pcm' : 'voice.webm'
+    formData.append('file', audioBlob, fileName)
+    const response = await fetch(`${API_BASE}/voice/transcriptions?language=${encodeURIComponent(language)}`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(err.detail || '语音转写失败')
+    }
+    return response.json()
   },
 }

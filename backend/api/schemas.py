@@ -22,6 +22,8 @@ class SendMessageRequest(BaseModel):
     content: str
     user_id: Optional[str] = None
     room_id: Optional[str] = None
+    feedback_task_id: Optional[str] = None
+    presentation_scene: Optional[str] = None
 
 
 class MessageResponse(BaseModel):
@@ -96,3 +98,11 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: datetime
     version: str = "1.0.0"
+
+
+class VoiceTranscriptionResponse(BaseModel):
+    success: bool
+    text: Optional[str] = None
+    error: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
