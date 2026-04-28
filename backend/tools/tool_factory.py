@@ -1,5 +1,5 @@
-from backend.tools.im_tool import IMTool
 from backend.tools.doc_tool import DocTool
+from backend.tools.im_tool import IMTool
 from backend.tools.ppt_tool import PPTTool
 
 
@@ -20,9 +20,25 @@ class ToolFactory:
         return cls._tools[tool_name]
 
     @classmethod
+    def get_langchain_tool(cls, tool_name: str):
+        return cls.get_tool(tool_name).langchain_tool
+
+    @classmethod
+    async def invoke_tool(cls, tool_name: str, payload: dict):
+        return await cls.get_tool(tool_name).ainvoke(payload)
+
+    @classmethod
     def get_all_tools(cls):
         return {
             "IMTool": cls.get_tool("IMTool"),
             "DocTool": cls.get_tool("DocTool"),
-            "PPTTool": cls.get_tool("PPTTool")
+            "PPTTool": cls.get_tool("PPTTool"),
+        }
+
+    @classmethod
+    def get_all_langchain_tools(cls):
+        return {
+            "IMTool": cls.get_langchain_tool("IMTool"),
+            "DocTool": cls.get_langchain_tool("DocTool"),
+            "PPTTool": cls.get_langchain_tool("PPTTool"),
         }

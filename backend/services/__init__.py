@@ -9,6 +9,7 @@ from backend.services.deck_spec import DeckSpec, SlideSpec, create_default_deck
 from backend.services.deck_renderer import slidev_renderer, pptx_renderer, render_deck
 from backend.services.delivery_service import delivery_service, DeliveryService, DeliveryCard
 from backend.services.sync_service import sync_service, SyncService, EventType
+from backend.services.speech_service import speech_service, SpeechService
 
 __all__ = [
     # LLM
@@ -37,4 +38,6 @@ __all__ = [
     "sync_service",
     "SyncService",
     "EventType",
+    "speech_service",
+    "SpeechService",
 ]

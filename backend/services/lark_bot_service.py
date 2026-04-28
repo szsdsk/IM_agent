@@ -3,8 +3,10 @@ import logging
 import mimetypes
 import re
 import time
+import uuid
+from base64 import b64encode
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -42,7 +44,7 @@ class LarkBotService:
             self._client = None
 
     async def get_status(self, check_auth: bool = False) -> Dict[str, Any]:
-        """返回飞书应用配置和 tenant token 状态，避免健康检查再依赖 CLI。"""
+        """返回飞书应用配置和 tenant token 状态，避免健康检查依赖外部命令。"""
         configured = bool(self.app_id and self.app_secret)
         status = {
             "success": bool(settings.LARK_BOT_ENABLED and configured),
@@ -218,6 +220,133 @@ class LarkBotService:
             "upload": upload_result,
         }
 
+    async def download_message_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str = "file",
+    ) -> Dict[str, Any]:
+        """Download a Feishu message resource, such as a voice attachment."""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+        if not message_id or not file_key:
+            return {"success": False, "error": "Missing message_id or file_key."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        response = await self.client.get(
+            f"/im/v1/messages/{message_id}/resources/{file_key}",
+            params={"type": resource_type},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        return {
+            "success": True,
+            "content": response.content,
+            "content_type": response.headers.get("content-type", "application/octet-stream"),
+        }
+
+    async def recognize_speech_file(
+        self,
+        audio_bytes: bytes,
+        file_id: Optional[str] = None,
+        audio_format: Optional[str] = None,
+        engine_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Recognize a short audio file with Feishu speech_to_text ASR."""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+        if not audio_bytes:
+            return {"success": False, "error": "Audio file is empty."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        safe_file_id = re.sub(r"[^0-9A-Za-z_]", "_", (file_id or "").strip())
+        if len(safe_file_id) != 16:
+            safe_file_id = uuid.uuid4().hex[:16]
+
+        payload = {
+            "speech": {
+                "speech": b64encode(audio_bytes).decode("ascii"),
+            },
+            "config": {
+                "file_id": safe_file_id,
+                "format": audio_format or settings.FEISHU_ASR_FORMAT,
+                "engine_type": engine_type or settings.FEISHU_ASR_ENGINE_TYPE,
+            },
+        }
+
+        try:
+            response = await self.client.post(
+                "/speech_to_text/v1/speech/file_recognize",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            if exc.response is not None:
+                detail = exc.response.text[:1000]
+            error_msg = (
+                f"HTTP {exc.response.status_code if exc.response is not None else 'error'}; "
+                f"format={payload['config']['format']}; engine_type={payload['config']['engine_type']}; "
+                f"detail={detail or str(exc)}"
+            )
+            return {"success": False, "error": error_msg}
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": (
+                    f"Unexpected ASR error; format={payload['config']['format']}; "
+                    f"engine_type={payload['config']['engine_type']}; detail={str(exc)}"
+                ),
+            }
+
+        text = str(((data.get("data") or {}).get("recognition_text")) or "").strip()
+        return {
+            "success": data.get("code") == 0 and bool(text),
+            "text": text,
+            "provider": "feishu_asr",
+            "model": payload["config"]["engine_type"],
+            "error": None if data.get("code") == 0 else data.get("msg"),
+            "raw": data,
+        }
+
+    async def send_card(self, chat_id: str, card: Dict[str, Any]) -> Dict[str, Any]:
+        """发送飞书交互卡片消息。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+        if not chat_id:
+            return {"success": False, "error": "Missing chat_id."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        response = await self.client.post(
+            "/im/v1/messages",
+            params={"receive_id_type": "chat_id"},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "success": data.get("code") == 0,
+            "provider": "lark_openapi",
+            "message_id": (data.get("data") or {}).get("message_id"),
+            "error": None if data.get("code") == 0 else data.get("msg"),
+        }
+
     def verify_event(self, payload: Dict[str, Any]) -> bool:
         if not self.verification_token:
             return True
@@ -243,10 +372,11 @@ class LarkBotService:
             return None
 
         text = self._extract_text(message)
-        if not text:
+        voice_resource = self._extract_voice_resource(message)
+        if not text and not voice_resource:
             return None
 
-        if settings.LARK_BOT_REQUIRE_MENTION and message.get("chat_type") == "group":
+        if text and settings.LARK_BOT_REQUIRE_MENTION and message.get("chat_type") == "group":
             mentions = message.get("mentions") or []
             if not mentions:
                 return None
@@ -261,6 +391,7 @@ class LarkBotService:
             "chat_id": message.get("chat_id"),
             "chat_type": message.get("chat_type"),
             "text": text.strip(),
+            "voice_resource": voice_resource,
             "user_id": self._sender_id(sender),
         }
 
@@ -274,6 +405,26 @@ class LarkBotService:
             return str(parsed.get("text") or "")
         except (json.JSONDecodeError, TypeError):
             return str(content)
+
+    def _extract_voice_resource(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if message.get("message_type") not in {"audio", "voice", "media"}:
+            return None
+
+        content = message.get("content") or ""
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+        file_key = parsed.get("file_key") or parsed.get("key") or parsed.get("fileKey")
+        if not file_key:
+            return None
+
+        return {
+            "file_key": file_key,
+            "duration": parsed.get("duration") or parsed.get("duration_ms"),
+            "message_type": message.get("message_type"),
+        }
 
     def _strip_mentions(self, text: str, mentions: Any) -> str:
         cleaned = text
@@ -326,6 +477,236 @@ class LarkBotService:
             if secret:
                 redacted = redacted.replace(secret, "***")
         return redacted[:2000]
+
+    # ============ Docx API ============
+
+    async def create_doc(self, title: str = "未命名文档", folder_token: str = None) -> Dict[str, Any]:
+        """创建飞书云文档，返回 document_id 和访问链接。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        payload: Dict[str, Any] = {"title": title}
+        if folder_token:
+            payload["folder_token"] = folder_token
+
+        response = await self.client.post(
+            "/docx/v1/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        doc = (data.get("data") or {}).get("document", {})
+        return {
+            "success": data.get("code") == 0,
+            "document_id": doc.get("document_id"),
+            "title": doc.get("title", title),
+            "url": (data.get("data") or {}).get("url", ""),
+            "revision_id": (data.get("data") or {}).get("revision_id"),
+            "error": None if data.get("code") == 0 else data.get("msg"),
+        }
+
+    async def create_doc_block(
+        self,
+        document_id: str,
+        block_id: str,
+        blocks: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """向飞书文档追加 block 内容。block_id 为页面根节点时用 document_id。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        payload = {"children": blocks}
+
+        response = await self.client.post(
+            f"/docx/v1/documents/{document_id}/blocks/{block_id}/children",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "success": data.get("code") == 0,
+            "children": (data.get("data") or {}).get("children", []),
+            "error": None if data.get("code") == 0 else data.get("msg"),
+        }
+
+    async def write_markdown_to_doc(
+        self,
+        document_id: str,
+        markdown: str,
+    ) -> Dict[str, Any]:
+        """将 Markdown 内容写入飞书文档。"""
+        blocks = markdown_to_lark_blocks(markdown)
+        if not blocks:
+            return {"success": True, "document_id": document_id, "blocks_written": 0}
+
+        result = await self.create_doc_block(document_id, document_id, blocks)
+        return {
+            **result,
+            "document_id": document_id,
+            "blocks_written": len(blocks) if result.get("success") else 0,
+        }
+
+
+def markdown_to_lark_blocks(markdown: str) -> List[Dict[str, Any]]:
+    """将 Markdown 转换为飞书 Docx block 结构。"""
+    blocks: List[Dict[str, Any]] = []
+
+    def _text_element(content: str, link: str = None) -> Dict:
+        elem: Dict[str, Any] = {"text_run": {"content": content}}
+        if link:
+            elem["text_run"]["link"] = {"url": link}
+        return elem
+
+    for line in markdown.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("### "):
+            blocks.append({
+                "block_type": 5,  # heading3
+                "heading3": {"elements": [_text_element(stripped[4:])]},
+            })
+        elif stripped.startswith("## "):
+            blocks.append({
+                "block_type": 4,  # heading2
+                "heading2": {"elements": [_text_element(stripped[3:])]},
+            })
+        elif stripped.startswith("# "):
+            blocks.append({
+                "block_type": 3,  # heading1
+                "heading1": {"elements": [_text_element(stripped[2:])]},
+            })
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            blocks.append({
+                "block_type": 16,  # bullet
+                "bullet": {"elements": [_text_element(stripped[2:])]},
+            })
+        elif stripped.startswith("> "):
+            blocks.append({
+                "block_type": 18,  # quote
+                "quote": {"elements": [_text_element(stripped[2:])]},
+            })
+        elif stripped == "---":
+            blocks.append({"block_type": 22})  # divider
+        else:
+            # Remove leading number prefix like "1. "
+            content = stripped
+            if len(content) > 2 and content[0].isdigit() and content[1] in ".)" :
+                content = content[2:].strip()
+            blocks.append({
+                "block_type": 2,  # text
+                "text": {"elements": [_text_element(content)]},
+            })
+
+    return blocks
+
+
+def build_progress_card(task_id: str, step: str, progress: float) -> Dict[str, Any]:
+    """构建任务进度卡片。"""
+    step_names = {
+        "receive_input": "接收输入",
+        "parse_intent": "分析需求",
+        "plan_workflow": "规划流程",
+        "extract_tasks": "提取任务",
+        "generate_doc": "生成文档",
+        "generate_slides": "生成 PPT",
+        "confirm_or_modify": "等待确认",
+        "deliver_result": "交付结果",
+    }
+    step_name = step_names.get(step, step)
+    pct = int(progress * 100)
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Agent-Pilot 任务进行中"},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**当前步骤**: {step_name}\n**任务 ID**: `{task_id}`"},
+            },
+            {
+                "tag": "progress_bar",
+                "progress_bar": {"percentage": pct, "indicator": True},
+            },
+        ],
+    }
+
+
+def build_delivery_card(
+    task_id: str,
+    doc_title: str = None,
+    doc_url: str = None,
+    slides_title: str = None,
+    slides_count: int = 0,
+    chat_id: str = None,
+) -> Dict[str, Any]:
+    """构建任务交付卡片（含交互按钮）。"""
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**任务 ID**: `{task_id}`"},
+        },
+    ]
+
+    if doc_title:
+        doc_line = f"📄 **文档**: {doc_title}"
+        if doc_url:
+            doc_line += f"  [查看]({doc_url})"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": doc_line}})
+
+    if slides_title:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📊 **PPT**: {slides_title} ({slides_count} 页)"},
+        })
+
+    elements.append({"tag": "hr"})
+
+    # Interactive buttons
+    action_value: Dict[str, str] = {"task_id": task_id}
+    if chat_id:
+        action_value["chat_id"] = chat_id
+
+    elements.append({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "确认交付"},
+                "type": "primary",
+                "value": {**action_value, "action": "confirm_delivery"},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "需要修改"},
+                "type": "default",
+                "value": {**action_value, "action": "request_modification"},
+            },
+        ],
+    })
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Agent-Pilot 任务完成"},
+            "template": "green",
+        },
+        "elements": elements,
+    }
 
 
 lark_bot_service = LarkBotService()

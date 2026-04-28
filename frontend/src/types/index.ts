@@ -56,6 +56,13 @@ export interface Session {
   created_at: string
 }
 
+export type PresentationScene =
+  | 'management_briefing'
+  | 'project_review'
+  | 'proposal_pitch'
+  | 'postmortem'
+  | 'training'
+
 export interface WebSocketMessage {
   type: 'task.progress' | 'task.completed' | 'task.failed' | 'session.sync' | 'agent.message' | 'pong'
   task_id?: string
@@ -65,6 +72,7 @@ export interface WebSocketMessage {
   progress?: number
   status?: string
   data?: Record<string, any>
+  state?: Record<string, any>
   result?: Record<string, any>
   error?: string
   timestamp: string

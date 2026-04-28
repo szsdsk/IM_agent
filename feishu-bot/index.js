@@ -96,6 +96,31 @@ function getText(message) {
   }
 }
 
+function getVoiceResource(message) {
+  if (!message || !["audio", "voice", "media"].includes(message.message_type)) {
+    return null;
+  }
+
+  try {
+    const content = JSON.parse(message.content || "{}");
+    const fileKey = content.file_key || content.key || content.fileKey;
+    if (!fileKey) {
+      return null;
+    }
+    return {
+      fileKey,
+      duration: content.duration || content.duration_ms || null,
+      messageType: message.message_type,
+    };
+  } catch (error) {
+    log("Failed to parse voice message content", {
+      message: error && error.message,
+      content: message.content,
+    });
+    return null;
+  }
+}
+
 function stripMentions(text, mentions) {
   let cleaned = text;
   for (const mention of mentions || []) {
@@ -107,6 +132,73 @@ function stripMentions(text, mentions) {
     }
   }
   return cleaned.replace(/@\S+/g, "").trim();
+}
+
+async function getTenantAccessToken() {
+  const response = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+  });
+  const data = await response.json();
+  if (!response.ok || data.code !== 0 || !data.tenant_access_token) {
+    throw new Error(`Failed to get tenant access token: ${data.msg || response.statusText}`);
+  }
+  return data.tenant_access_token;
+}
+
+async function downloadMessageResource(messageId, fileKey) {
+  const token = await getTenantAccessToken();
+  const resourceUrl = new URL(
+    `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/resources/${encodeURIComponent(fileKey)}`
+  );
+  resourceUrl.searchParams.set("type", "file");
+
+  const response = await fetch(resourceUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to download voice resource ${response.status}: ${text.slice(0, 500)}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "application/octet-stream";
+  const arrayBuffer = await response.arrayBuffer();
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    contentType,
+  };
+}
+
+async function transcribeVoice(messageId, resource) {
+  const { buffer, contentType } = await downloadMessageResource(messageId, resource.fileKey);
+  const extension = contentType.includes("mpeg")
+    ? "mp3"
+    : contentType.includes("wav")
+      ? "wav"
+      : contentType.includes("ogg") || contentType.includes("opus")
+        ? "ogg"
+        : "bin";
+
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([buffer], { type: contentType }),
+    `feishu-${messageId}.${extension}`
+  );
+
+  const response = await fetch(`${backendUrl}/api/voice/transcriptions?language=zh`, {
+    method: "POST",
+    body: form,
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.text) {
+    throw new Error(data.detail || data.error || `Voice transcription failed: ${response.status}`);
+  }
+
+  return String(data.text).trim();
 }
 
 async function reply(messageId, text) {
@@ -151,10 +243,16 @@ async function submitToAgentPilot(event) {
   const messageId = message.message_id;
   const senderId = getSenderId(event.sender);
   const rawText = getText(message);
-  const text = stripMentions(rawText, message.mentions);
+  const voiceResource = getVoiceResource(message);
+  let text = stripMentions(rawText, message.mentions);
+
+  if (!text && voiceResource) {
+    await safeReply(messageId, "收到语音指令，正在转写并启动 Agent-Pilot...");
+    text = await transcribeVoice(messageId, voiceResource);
+  }
 
   if (!text) {
-    await safeReply(messageId, "我收到了消息，但目前只处理文本需求。");
+    await safeReply(messageId, "我收到了消息，但目前只支持文本或语音指令。");
     return;
   }
 
