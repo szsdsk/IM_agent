@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class IntentAnalysis(BaseModel):
     intent_summary: str = ""
     content_types: List[str] = Field(default_factory=lambda: ["doc", "slides"])
+    presentation_scene: Optional[str] = None
     audience: str = "管理层"
     constraints: List[str] = Field(default_factory=list)
     questions: List[str] = Field(default_factory=list)
@@ -37,6 +38,7 @@ class WorkflowStep(BaseModel):
 
 class WorkflowPlan(BaseModel):
     goal: str = ""
+    presentation_scene: Optional[str] = None
     audience: str = "管理层"
     artifacts: List[str] = Field(default_factory=list)
     steps: List[WorkflowStep] = Field(default_factory=list)
@@ -55,6 +57,7 @@ class DeckSpecModel(BaseModel):
     audience: str = "管理层"
     duration_minutes: int = 5
     theme: str = "business_blue"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     slides: List[DeckSlide] = Field(default_factory=list)
 
 
@@ -243,6 +246,49 @@ class LLMService:
 llm_service = LLMService()
 
 
+SCENE_PROFILES: Dict[str, Dict[str, Any]] = {
+    "management_briefing": {
+        "label": "管理层汇报",
+        "audience": "管理层",
+        "theme": "business_blue",
+        "duration_minutes": 5,
+        "outline": ["结论摘要", "业务背景", "核心方案", "风险与决策", "下一步"],
+    },
+    "project_review": {
+        "label": "项目评审",
+        "audience": "项目团队 / 评审方",
+        "theme": "tech_dark",
+        "duration_minutes": 8,
+        "outline": ["项目背景", "目标范围", "方案设计", "实施计划", "风险依赖", "评审问题"],
+    },
+    "proposal_pitch": {
+        "label": "方案提案",
+        "audience": "客户 / 业务方",
+        "theme": "minimal",
+        "duration_minutes": 6,
+        "outline": ["机会洞察", "问题痛点", "提案方案", "价值收益", "落地路径"],
+    },
+    "postmortem": {
+        "label": "复盘总结",
+        "audience": "团队内部",
+        "theme": "tech_dark",
+        "duration_minutes": 7,
+        "outline": ["事件背景", "结果概览", "问题分析", "经验教训", "改进动作"],
+    },
+    "training": {
+        "label": "培训讲解",
+        "audience": "学习者",
+        "theme": "minimal",
+        "duration_minutes": 10,
+        "outline": ["学习目标", "核心概念", "操作步骤", "示例演示", "常见问题", "练习与总结"],
+    },
+}
+
+
+def get_scene_profile(scene: Optional[str]) -> Dict[str, Any]:
+    return SCENE_PROFILES.get(scene or "", SCENE_PROFILES["management_briefing"])
+
+
 SYSTEM_PROMPTS = {
     "intent_parser": """你是一个任务规划助手。用户会通过 IM 输入需求，你需要：
 1. 理解用户的核心意图
@@ -287,11 +333,24 @@ SYSTEM_PROMPTS = {
     "rehearsal": """你是一个演讲排练助手。根据 PPT 内容生成每页讲稿、预计时间、可能的 Q&A 和提示要点。""",
 }
 
+SYSTEM_PROMPTS["doc_reviser"] = (
+    "You revise an existing markdown document based on user feedback. "
+    "Keep the original topic and most structure stable, but apply the requested changes clearly. "
+    "Return the full revised markdown document."
+)
+
+SYSTEM_PROMPTS["slides_reviser"] = (
+    "You revise an existing presentation deck based on user feedback. "
+    "Preserve unaffected slides when possible and update only the slides impacted by the request. "
+    "Return a complete DeckSpec JSON object."
+)
+
 
 async def parse_intent(user_input: str, context: Optional[List[Dict]] = None) -> Dict[str, Any]:
     default = {
         "intent_summary": user_input,
         "content_types": ["doc", "slides"],
+        "presentation_scene": None,
         "audience": "管理层",
         "constraints": [],
         "questions": [],
@@ -310,8 +369,10 @@ async def parse_intent(user_input: str, context: Optional[List[Dict]] = None) ->
 
 
 async def plan_workflow(intent: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+    scene = (context or {}).get("presentation_scene")
     default = {
         "goal": intent,
+        "presentation_scene": scene,
         "audience": (context or {}).get("audience", "管理层"),
         "artifacts": ["document", "slides"],
         "steps": [
@@ -343,21 +404,44 @@ async def generate_doc_content(title: str, intent: str, outline: Optional[Dict] 
     return response.get("content", "")
 
 
-async def generate_deck_spec(title: str, doc_content: str, audience: str = "管理层") -> Dict[str, Any]:
+async def generate_deck_spec(
+    title: str,
+    doc_content: str,
+    audience: str = "管理层",
+    presentation_scene: Optional[str] = None,
+) -> Dict[str, Any]:
+    scene_key = presentation_scene or "management_briefing"
+    scene_profile = get_scene_profile(scene_key)
+    audience = audience or scene_profile["audience"]
+    outline = scene_profile["outline"]
+
     default = {
         "title": title,
         "audience": audience,
-        "duration_minutes": 5,
-        "theme": "business_blue",
+        "duration_minutes": scene_profile["duration_minutes"],
+        "theme": scene_profile["theme"],
+        "metadata": {
+            "presentation_scene": scene_key,
+            "template_profile": scene_key,
+            "scene_label": scene_profile["label"],
+        },
         "slides": [
-            {"index": 0, "title": "封面", "layout": "title", "content": title, "bullets": []},
-            {"index": 1, "title": "背景与目标", "layout": "content", "content": "说明背景、目标和价值。", "bullets": []},
-            {"index": 2, "title": "核心方案", "layout": "content", "content": "拆解主要方案和执行路径。", "bullets": []},
-            {"index": 3, "title": "风险与待办", "layout": "content", "content": "列出风险、依赖和后续行动。", "bullets": []},
-            {"index": 4, "title": "下一步", "layout": "content", "content": "明确下一步计划。", "bullets": []},
+            {"index": 0, "title": title, "layout": "title", "content": scene_profile["label"], "bullets": [scene_profile["label"]]},
+            {"index": 1, "title": outline[0], "layout": "content", "content": "开场与结论", "bullets": [f"场景：{scene_profile['label']}", f"受众：{audience}"]},
+            {"index": 2, "title": outline[1], "layout": "content", "content": "背景与上下文", "bullets": []},
+            {"index": 3, "title": outline[2], "layout": "two_column", "content": "核心结构", "bullets": []},
+            {"index": 4, "title": outline[3], "layout": "content", "content": "关键风险或价值", "bullets": []},
+            {"index": 5, "title": outline[-1], "layout": "content", "content": "行动与收尾", "bullets": []},
         ],
     }
-    prompt = f"文档标题：{title}\n\n文档内容：\n{doc_content[:4000]}\n\n目标受众：{audience}"
+    prompt = (
+        f"文档标题：{title}\n\n"
+        f"文档内容：\n{doc_content[:4000]}\n\n"
+        f"目标受众：{audience}\n"
+        f"演示场景：{scene_key}\n"
+        f"场景说明：{scene_profile['label']}\n"
+        f"建议结构：{' / '.join(outline)}"
+    )
 
     return await llm_service.structured_chat(
         [{"role": "user", "content": prompt}],
@@ -383,5 +467,51 @@ async def generate_rehearsal(deck_spec: Dict[str, Any]) -> Dict[str, Any]:
         [{"role": "user", "content": prompt}],
         RehearsalPlan,
         system_prompt=SYSTEM_PROMPTS["rehearsal"],
+        default=default,
+    ) or default
+
+
+async def revise_doc_content(title: str, original_content: str, feedback: str) -> str:
+    prompt = (
+        f"# Document Title\n{title}\n\n"
+        f"# User Feedback\n{feedback}\n\n"
+        f"# Original Document\n{original_content[:8000]}\n\n"
+        "# Task\nReturn the full revised markdown document."
+    )
+
+    response = await llm_service.chat(
+        [{"role": "user", "content": prompt}],
+        system_prompt=SYSTEM_PROMPTS["doc_reviser"],
+        temperature=0.3,
+    )
+    return response.get("content", "")
+
+
+async def revise_deck_spec(
+    title: str,
+    original_slides: List[Dict[str, Any]],
+    feedback: str,
+    audience: str = "management",
+    doc_content: str = "",
+) -> Dict[str, Any]:
+    default = {
+        "title": title,
+        "audience": audience,
+        "duration_minutes": 5,
+        "theme": "business_blue",
+        "slides": original_slides,
+    }
+    prompt = (
+        f"# Deck Title\n{title}\n\n"
+        f"# User Feedback\n{feedback}\n\n"
+        f"# Original Slides\n{json.dumps(original_slides, ensure_ascii=False, indent=2)}\n\n"
+        f"# Supporting Document\n{doc_content[:4000]}\n\n"
+        "# Task\nReturn a complete revised DeckSpec JSON object."
+    )
+
+    return await llm_service.structured_chat(
+        [{"role": "user", "content": prompt}],
+        DeckSpecModel,
+        system_prompt=SYSTEM_PROMPTS["slides_reviser"],
         default=default,
     ) or default

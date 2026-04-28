@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import ChatBox from './components/ChatBox'
 import AgentStatus from './components/AgentStatus'
 import ProgressTimeline from './components/ProgressTimeline'
 import DocViewer from './components/DocViewer'
 import SlideViewer from './components/SlideViewer'
+import VoiceTranscriber from './components/VoiceTranscriber'
 import { api } from './services/api'
 import { wsService } from './services/websocket'
 import { useSessionStore } from './store/useSessionStore'
@@ -37,10 +37,8 @@ export default function App() {
           wsService.connect(sessionId)
           return
         }
-
         const session = await api.createSession()
         if (cancelled) return
-
         setSessionId(session.id)
         wsService.connect(session.id)
       } catch (error) {
@@ -93,7 +91,7 @@ export default function App() {
       <main className="max-w-[1920px] mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-3 flex flex-col gap-6">
-            <ChatBox className="h-[600px]" />
+            <VoiceTranscriber />
           </div>
 
           <div className="lg:col-span-3 flex flex-col gap-6">

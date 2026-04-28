@@ -166,10 +166,11 @@ class WebSocketService {
     }
   }
 
-  sendMessage(content: string): void {
+  sendMessage(content: string, presentationScene?: string): void {
     this.send({
       type: 'message',
       content,
+      presentation_scene: presentationScene,
     })
   }
 
