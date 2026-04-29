@@ -1,4 +1,4 @@
-﻿import type { Session, Task, Document, Slide, Message, Health, PresentationScene } from '../types'
+import type { Session, Task, Document, Slide, Message, Health, PresentationScene } from '../types'
 
 const API_BASE = '/api'
 
@@ -64,6 +64,7 @@ export const api = {
     return fetchAPI<Slide>(`/slides/${slideId}`)
   },
 
+  // 前端只用 health 判断后端是否存活。
   async healthCheck(): Promise<Health> {
     return fetchAPI<Health>('/health')
   },

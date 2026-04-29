@@ -168,7 +168,6 @@ async def parse_intent(state: AgentState) -> AgentState:
             state["pending_questions"] = intent_result["questions"]
 
         _append_message(state, "assistant", analysis_text, "parse_intent")
-
     except Exception as exc:
         logger.exception("Error in parse_intent")
         _append_message(state, "assistant", f"分析出错: {str(exc)}", "parse_intent")

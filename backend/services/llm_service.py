@@ -246,6 +246,7 @@ class LLMService:
 llm_service = LLMService()
 
 
+
 SCENE_PROFILES: Dict[str, Dict[str, Any]] = {
     "management_briefing": {
         "label": "管理层汇报",
@@ -442,6 +443,7 @@ async def generate_deck_spec(
         f"场景说明：{scene_profile['label']}\n"
         f"建议结构：{' / '.join(outline)}"
     )
+
 
     return await llm_service.structured_chat(
         [{"role": "user", "content": prompt}],

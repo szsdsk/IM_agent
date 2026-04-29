@@ -44,7 +44,7 @@ class LarkBotService:
             self._client = None
 
     async def get_status(self, check_auth: bool = False) -> Dict[str, Any]:
-        """返回飞书应用配置和 tenant token 状态，避免健康检查依赖外部命令。"""
+        """返回飞书应用配置和 tenant token 状态，避免健康检查再依赖 CLI。"""
         configured = bool(self.app_id and self.app_secret)
         status = {
             "success": bool(settings.LARK_BOT_ENABLED and configured),
@@ -220,6 +220,7 @@ class LarkBotService:
             "upload": upload_result,
         }
 
+
     async def download_message_resource(
         self,
         message_id: str,
@@ -317,6 +318,7 @@ class LarkBotService:
             "raw": data,
         }
 
+
     async def send_card(self, chat_id: str, card: Dict[str, Any]) -> Dict[str, Any]:
         """发送飞书交互卡片消息。"""
         if not self.is_configured:
@@ -393,6 +395,49 @@ class LarkBotService:
             "text": text.strip(),
             "voice_resource": voice_resource,
             "user_id": self._sender_id(sender),
+        }
+
+    def extract_doc_event(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """解析飞书文档变更事件。
+
+        支持两种触发方式：
+        1. 事件订阅（docx.document.editable_version_updated）：event 包含 doc_id、editor 等
+        2. 卡片回调（卡片中嵌入"在飞书中编辑"按钮，用户点击后跳转飞书并回调）：
+           此时 payload 来自卡片 action，包含 lark_doc_id、task_id 等字段
+
+        Returns doc info dict with keys: doc_id, user_id, revision_id, task_id (if from card).
+        """
+        # Case 1: Card callback with embedded doc info (highest priority)
+        action = payload.get("action", {}) if isinstance(payload, dict) else {}
+        value = action.get("value", {}) if isinstance(action, dict) else {}
+        card_doc_id = value.get("lark_doc_id") or value.get("doc_id")
+        card_task_id = value.get("task_id")
+        card_user_id = value.get("user_id") or value.get("open_id") or payload.get("open_id")
+
+        if card_doc_id:
+            return {
+                "doc_id": card_doc_id,
+                "task_id": card_task_id,
+                "user_id": card_user_id,
+                "source": "card_callback",
+            }
+
+        # Case 2: Event subscription (docx.document.editable_version_updated)
+        event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+        doc_info = event.get("doc", {}) if isinstance(event, dict) else {}
+        doc_id = doc_info.get("document_id")
+        if not doc_id:
+            return None
+
+        operator = event.get("operator", {}) if isinstance(event, dict) else {}
+        operator_info = operator.get("operator_id", {}) if isinstance(operator, dict) else {}
+        user_id = operator_info.get("open_id") or operator_info.get("user_id") or operator_info.get("union_id")
+
+        return {
+            "doc_id": doc_id,
+            "revision_id": doc_info.get("revision_id"),
+            "user_id": user_id,
+            "source": "event_subscription",
         }
 
     def _extract_text(self, message: Dict[str, Any]) -> str:
@@ -556,6 +601,31 @@ class LarkBotService:
             "blocks_written": len(blocks) if result.get("success") else 0,
         }
 
+    async def get_doc_raw_content(self, document_id: str) -> Dict[str, Any]:
+        """读取飞书云文档的纯文本内容，用于编辑后回写本地状态。"""
+        if not self.is_configured:
+            return {"success": False, "error": "Lark OpenAPI is not configured."}
+
+        token = await self.get_tenant_access_token()
+        if not token:
+            return {"success": False, "error": "Failed to get tenant access token."}
+
+        try:
+            response = await self.client.get(
+                f"/docx/v1/documents/{document_id}/raw_content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "success": data.get("code") == 0,
+                "content": (data.get("data") or {}).get("content", ""),
+                "error": None if data.get("code") == 0 else data.get("msg"),
+            }
+        except Exception as exc:
+            logger.exception("Failed to fetch raw content of doc %s", document_id)
+            return {"success": False, "error": str(exc)}
+
 
 def markdown_to_lark_blocks(markdown: str) -> List[Dict[str, Any]]:
     """将 Markdown 转换为飞书 Docx block 结构。"""
@@ -653,6 +723,7 @@ def build_delivery_card(
     slides_title: str = None,
     slides_count: int = 0,
     chat_id: str = None,
+    lark_doc_id: str = None,
 ) -> Dict[str, Any]:
     """构建任务交付卡片（含交互按钮）。"""
     elements: List[Dict[str, Any]] = [
@@ -665,7 +736,7 @@ def build_delivery_card(
     if doc_title:
         doc_line = f"📄 **文档**: {doc_title}"
         if doc_url:
-            doc_line += f"  [查看]({doc_url})"
+            doc_line += f"  [在飞书中打开]({doc_url})"
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": doc_line}})
 
     if slides_title:
@@ -681,22 +752,33 @@ def build_delivery_card(
     if chat_id:
         action_value["chat_id"] = chat_id
 
+    actions: List[Dict[str, Any]] = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "确认交付"},
+            "type": "primary",
+            "value": {**action_value, "action": "confirm_delivery"},
+        },
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "需要修改"},
+            "type": "default",
+            "value": {**action_value, "action": "request_modification"},
+        },
+    ]
+
+    # If Feishu doc exists, add "edit done" button to trigger writeback
+    if lark_doc_id:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "已在飞书中编辑"},
+            "type": "default",
+            "value": {**action_value, "action": "doc_edited", "lark_doc_id": lark_doc_id},
+        })
+
     elements.append({
         "tag": "action",
-        "actions": [
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "确认交付"},
-                "type": "primary",
-                "value": {**action_value, "action": "confirm_delivery"},
-            },
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "需要修改"},
-                "type": "default",
-                "value": {**action_value, "action": "request_modification"},
-            },
-        ],
+        "actions": actions,
     })
 
     return {

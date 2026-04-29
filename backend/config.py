@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     FEISHU_ASR_FORMAT: str = "pcm"
     FEISHU_ASR_ENGINE_TYPE: str = "16k_auto"
 
+
     # IM provider selector. The current demo defaults to Feishu/Lark bot events.
     IM_PROVIDER: str = "lark"
 

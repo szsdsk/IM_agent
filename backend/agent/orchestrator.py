@@ -297,6 +297,7 @@ class AgentOrchestrator:
                     slides_title=slides_info.get("title") if isinstance(slides_info, dict) else None,
                     slides_count=slides_info.get("slides_count", 0) if isinstance(slides_info, dict) else 0,
                     chat_id=room_id,
+                    lark_doc_id=doc_info.get("doc_id") if isinstance(doc_info, dict) else None,
                 )
                 card_result = await lark_bot_service.send_card(room_id, card)
                 if not card_result.get("success"):

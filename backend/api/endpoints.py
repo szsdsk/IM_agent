@@ -8,7 +8,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from backend.agent.orchestrator import agent_orchestrator
 from backend.api.schemas import (
     CreateSessionRequest,
@@ -26,6 +25,7 @@ from backend.database.connection import async_session_maker, get_db
 from backend.database.models import Document, Event, Session, Slide, Task
 from backend.services.lark_bot_service import lark_bot_service
 from backend.services.speech_service import speech_service
+from backend.services.sync_service import sync_service
 
 router = APIRouter()
 
@@ -372,6 +372,132 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
         if chat_id and lark_bot_service.is_configured:
             await lark_bot_service.send_text(chat_id, f"任务 {task_id} 已标记为需修改，请发送修改意见。")
 
+    elif action_name == "doc_edited":
+        # 卡片按钮会携带飞书文档 ID，这里负责把“已编辑完成”状态回写到本地任务。
+        doc_id = action_value.get("lark_doc_id")
+        if doc_id:
+            found_task_id = task_id
+            if not found_task_id:
+                async with async_session_maker() as db:
+                    result = await db.execute(
+                        select(Document).where(Document.lark_doc_id == doc_id)
+                    )
+                    doc_record = result.scalar_one_or_none()
+                    if doc_record:
+                        found_task_id = doc_record.task_id
+
+            if found_task_id:
+                doc_version = None
+                session_id = None
+                async with async_session_maker() as db:
+                    result = await db.execute(
+                        select(Document).where(Document.lark_doc_id == doc_id)
+                    )
+                    doc_record = result.scalar_one_or_none()
+                    if doc_record:
+                        doc_record.last_edited_by = payload.get("open_id")
+                        doc_record.last_edited_at = datetime.utcnow()
+                        doc_record.version = (doc_record.version or 1) + 1
+                        doc_version = doc_record.version
+
+                        task_result = await db.execute(select(Task).where(Task.id == found_task_id))
+                        task_record = task_result.scalar_one_or_none()
+                        session_id = task_record.session_id if task_record else None
+                        await db.commit()
+
+                        try:
+                            await sync_service.broadcast_doc_update(
+                                session_id=session_id or found_task_id,
+                                task_id=found_task_id,
+                                doc_id=doc_id,
+                                changes={
+                                    "last_edited_by": payload.get("open_id"),
+                                    "last_edited_at": datetime.utcnow().isoformat(),
+                                    "version": doc_record.version,
+                                    "source": "card_callback",
+                                },
+                            )
+                        except Exception:
+                            pass
+
+                chat_id = action_value.get("chat_id", "")
+                if chat_id and doc_version and lark_bot_service.is_configured:
+                    await lark_bot_service.send_text(chat_id, f"文档已更新，版本 v{doc_version}，状态已同步 ✅")
+
+    return {"code": 0, "msg": "ok"}
+
+
+@router.post("/im/lark/doc/events")
+async def lark_doc_event_callback(payload: Dict[str, Any], background_tasks: BackgroundTasks):
+    """飞书文档变更事件回调，处理文档编辑后的状态回写。
+
+    支持两种触发方式：
+    1. 卡片回调：用户在飞书中编辑文档后，点击卡片上的"已编辑完成"按钮触发
+       卡片 payload 包含 action.value.lark_doc_id、task_id 等字段
+    2. 事件订阅：飞书文档变更事件推送（需在飞书开放平台配置文档订阅）
+       payload 包含 event.doc.document_id、event.operator 等
+
+    收到后：
+    - 查询本地 Document 记录，更新 last_edited_by、last_edited_at
+    - 通过 SyncService 广播 doc.updated 事件给所有在线客户端
+    """
+    if not lark_bot_service.verify_event(payload):
+        raise HTTPException(status_code=403, detail="Invalid verification token")
+
+    doc_info = lark_bot_service.extract_doc_event(payload)
+    if not doc_info or not doc_info.get("doc_id"):
+        return {"code": 0, "msg": "No doc event found in payload"}
+
+    doc_id = doc_info["doc_id"]
+    user_id = doc_info.get("user_id")
+    task_id = doc_info.get("task_id")
+    source = doc_info.get("source", "unknown")
+
+    logger.info(
+        "Lark doc event: doc_id=%s, user=%s, task=%s, source=%s",
+        doc_id, user_id, task_id, source,
+    )
+
+    # 如果飞书事件没有带任务 ID，则从本地文档记录反查。
+    if not task_id:
+        async with async_session_maker() as db:
+            result = await db.execute(
+                select(Document).where(Document.lark_doc_id == doc_id)
+            )
+            doc_record = result.scalar_one_or_none()
+            if doc_record:
+                task_id = doc_record.task_id
+
+    # 更新文档编辑状态，并按任务所属会话广播给在线网页端。
+    if task_id:
+        async with async_session_maker() as db:
+            result = await db.execute(select(Document).where(Document.lark_doc_id == doc_id))
+            doc_record = result.scalar_one_or_none()
+            if doc_record:
+                doc_record.last_edited_by = user_id
+                doc_record.last_edited_at = datetime.utcnow()
+                doc_record.version = (doc_record.version or 1) + 1
+
+                task_result = await db.execute(select(Task).where(Task.id == task_id))
+                task_record = task_result.scalar_one_or_none()
+                session_id = task_record.session_id if task_record else doc_record.task_id
+                await db.commit()
+
+                try:
+                    await sync_service.broadcast_doc_update(
+                        session_id=session_id,
+                        task_id=task_id,
+                        doc_id=doc_id,
+                        changes={
+                            "last_edited_by": user_id,
+                            "last_edited_at": datetime.utcnow().isoformat(),
+                            "version": doc_record.version,
+                            "source": source,
+                        },
+                    )
+                except Exception as sync_exc:
+                    logger.warning("Failed to broadcast doc update: %s", sync_exc)
+
     return {"code": 0, "msg": "ok"}
 
 
@@ -395,6 +521,7 @@ async def transcribe_voice(
         model=result.get("model"),
         provider=result.get("provider"),
     )
+
 
 
 @router.post("/sessions", response_model=SessionResponse)
@@ -464,19 +591,6 @@ async def send_message(
                 "source": "lark",
                 "room_id": request.room_id,
             })
-
-    if request.room_id:
-        await manager.broadcast({
-            "type": "agent.message",
-            "task_id": task.id,
-            "session_id": session_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "data": {
-                "content": f"来自飞书的需求：{request.content}",
-                "source": "lark",
-                "chat_id": request.room_id,
-            },
-        })
 
     feedback_target = await _find_feedback_target(
         db=db,

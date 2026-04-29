@@ -93,37 +93,53 @@ class DocTool(BaseTool):
 
         # Try Feishu Docx API first
         from backend.services.lark_bot_service import lark_bot_service
+        from backend.database.connection import async_session_maker
+        from backend.database.models import Document
+
+        doc_id = f"doc_{int(time.time() * 1000)}"
+        doc_url = None
+        provider = "local"
+
         if lark_bot_service.is_configured:
             try:
                 doc_result = await lark_bot_service.create_doc(title=title or "未命名文档")
                 if doc_result.get("success") and doc_result.get("document_id"):
-                    document_id = doc_result["document_id"]
+                    doc_id = doc_result["document_id"]
                     doc_url = doc_result.get("url", "")
+                    provider = "lark_docx"
 
                     # Write content
                     if content:
                         write_result = await lark_bot_service.write_markdown_to_doc(
-                            document_id, content
+                            doc_id, content
                         )
                         self._log("info", f"Wrote {write_result.get('blocks_written', 0)} blocks to Feishu doc")
-
-                    return {
-                        "success": True,
-                        "doc_id": document_id,
-                        "title": title,
-                        "content": content,
-                        "doc_url": doc_url,
-                        "provider": "lark_docx",
-                    }
             except Exception as exc:
                 self._log("warning", f"Feishu Docx API failed, falling back: {str(exc)}")
 
-        # Fallback: local only
+        # Persist to local DB for all providers (including Feishu docs)
+        try:
+            async with async_session_maker() as db:
+                doc_record = Document(
+                    id=doc_id,
+                    task_id=task_id,
+                    content=content,
+                    lark_doc_id=doc_id if provider == "lark_docx" else None,
+                    lark_doc_url=doc_url,
+                )
+                db.add(doc_record)
+                await db.commit()
+                self._log("info", f"Saved Document record: {doc_id}, lark_doc_id={doc_id if provider == 'lark_docx' else None}")
+        except Exception as db_exc:
+            self._log("warning", f"Failed to persist Document record: {db_exc}")
+
         return {
             "success": True,
-            "doc_id": f"doc_{int(time.time() * 1000)}",
+            "doc_id": doc_id,
             "title": title,
             "content": content,
+            "doc_url": doc_url,
+            "provider": provider,
         }
 
     async def _update_document(self, doc_id: str, content: str) -> Dict[str, Any]:

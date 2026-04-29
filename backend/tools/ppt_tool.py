@@ -25,6 +25,7 @@ class PPTTool(BaseTool):
         )
         os.makedirs(self._output_dir, exist_ok=True)
 
+
     @staticmethod
     def _apply_template_profile(deck) -> None:
         profile = (deck.metadata or {}).get("template_profile") or (deck.metadata or {}).get("presentation_scene")
@@ -44,6 +45,7 @@ class PPTTool(BaseTool):
             first_slide = deck.slides[0]
             if not any(prefix in (first_slide.title or "") for prefix in ["管理汇报", "项目评审", "方案提案", "复盘总结", "培训讲解"]):
                 first_slide.title = f"{template['title_prefix']} · {first_slide.title}"
+
 
     def _build_langchain_tool(self):
         from langchain_core.tools import StructuredTool
