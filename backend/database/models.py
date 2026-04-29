@@ -40,6 +40,10 @@ class Document(Base):
     task_id = Column(String(36), ForeignKey("tasks.id"), nullable=False)
     content = Column(Text, nullable=True)
     version = Column(Integer, default=1)
+    lark_doc_id = Column(String(100), nullable=True, index=True)
+    lark_doc_url = Column(String(500), nullable=True)
+    last_edited_by = Column(String(100), nullable=True)
+    last_edited_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

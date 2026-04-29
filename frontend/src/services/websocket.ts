@@ -155,6 +155,31 @@ class WebSocketService {
           }
         }
         break
+
+      case 'doc.updated':
+        // Document edited in Feishu - update local state and notify user
+        if (data.data) {
+          const changes = data.data.changes || {}
+          const docId = data.data.doc_id
+          const currentDoc = store.doc
+          if (currentDoc && currentDoc.id === docId) {
+            store.setDoc({
+              ...currentDoc,
+              last_edited_by: changes.last_edited_by || currentDoc.last_edited_by,
+              last_edited_at: changes.last_edited_at || currentDoc.last_edited_at,
+              version: changes.version || currentDoc.version,
+            } as any)
+          }
+          // Notify user
+          const editor = changes.last_edited_by ? ` by ${changes.last_edited_by}` : ''
+          store.addMessage({
+            id: `msg-${Date.now()}`,
+            role: 'system',
+            content: `文档已在飞书中编辑${editor}，版本已更新至 v${changes.version || '?'}`,
+            timestamp: data.timestamp,
+          })
+        }
+        break
     }
   }
 

@@ -79,7 +79,7 @@ Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它把 
 | PPT 生成与导出 | 已完成 | 支持多主题多布局+演示场景适配，导出带视觉效果的 `.pptx` 文件 |
 | 交付结果 | 已完成 | 网页端可下载，飞书交互卡片含确认/修改按钮，bot 回传文件 |
 | 多端实时同步 | 已完成 | WebSocket + SyncService（内存/Redis），多标签页进度同步 |
-| 文档/白板编辑 | 部分完成 | 飞书云文档可编辑，编辑后回写状态待完善；白板/画布未接入 |
+| 文档/白板编辑 | 部分完成 | 飞书云文档可编辑，编辑后通过卡片按钮或事件订阅回写状态；白板/画布未接入 |
 | PPT 修改和演练 | 部分完成 | 卡片交互回调支持确认/修改，演练模型已定义但未接入 workflow |
 | 自然语言文本/语音指令 | 已完成 | 文本指令已支持，语音指令通过飞书 ASR 已接入 |
 | 飞书或类似 OpenAPI 集成 | 已完成 | bot 消息收发、交互卡片、文件上传/发送、云文档写入、语音转写已接入 |
@@ -230,7 +230,8 @@ https://your-domain.com/api/im/lark/card/action
 | `GET` | `/api/slides/{id}` | 获取生成 PPT 数据 |
 | `GET` | `/api/files/slides/{filename}` | 下载本地 PPT 文件 |
 | `POST` | `/api/im/lark/events` | 飞书事件订阅回调 |
-| `POST` | `/api/im/lark/card/action` | 飞书卡片交互回调（确认交付/需要修改） |
+| `POST` | `/api/im/lark/card/action` | 飞书卡片交互回调（确认交付/需要修改/已编辑完成） |
+| `POST` | `/api/im/lark/doc/events` | 飞书文档变更事件回调（编辑后状态回写） |
 | `WS` | `/api/ws/sessions/{id}` | 网页端实时进度推送 |
 
 ## 常见问题
@@ -274,10 +275,7 @@ https://your-domain.com/api/im/lark/card/action
 - [x] 多端同步 Redis 模式验证（内存/Redis 双通道测试通过）
 - [x] 语音输入（前端录音 + 飞书 ASR 转写 + VoiceTranscriber 组件）
 - [x] 演示场景选择（5 种场景适配不同 PPT 风格和内容侧重）
-
-进行中：
-
-- [ ] 文档在线编辑体验优化（飞书文档编辑后回写状态）
+- [x] 文档在线编辑体验优化（飞书文档编辑后回写状态 + 交付卡片嵌入编辑按钮）
 
 待实现：
 

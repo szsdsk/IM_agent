@@ -25,6 +25,10 @@ export interface Document {
   content: string
   version: number
   created_at: string
+  doc_url?: string | null
+  lark_doc_id?: string | null
+  last_edited_by?: string | null
+  last_edited_at?: string | null
 }
 
 export interface Slide {
@@ -65,7 +69,7 @@ export type PresentationScene =
   | 'training'
 
 export interface WebSocketMessage {
-  type: 'task.progress' | 'task.completed' | 'task.failed' | 'session.sync' | 'agent.message' | 'pong'
+  type: 'task.progress' | 'task.completed' | 'task.failed' | 'session.sync' | 'agent.message' | 'pong' | 'doc.updated'
   task_id?: string
   session_id?: string
   step?: string
