@@ -1,6 +1,7 @@
 import unittest
 
 from backend.tools.doc_tool import DocTool
+from backend.tools.canvas_tool import CanvasTool
 from backend.tools.ppt_tool import PPTTool
 from backend.tools.tool_factory import ToolFactory
 
@@ -48,6 +49,24 @@ class LangChainToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["title"], "工厂调用")
+
+    async def test_canvas_tool_mock_flow_diagram(self):
+        tool = CanvasTool(mock_mode=True)
+
+        result = await tool.ainvoke({
+            "action": "create_flow_diagram",
+            "task_id": "task_canvas",
+            "title": "流程图",
+            "nodes": [
+                {"id": "n1", "text": "开始", "type": "start"},
+                {"id": "n2", "text": "交付", "type": "process"},
+            ],
+            "edges": [{"source": "n1", "target": "n2"}],
+        })
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["provider"], "local_mock")
+        self.assertEqual(result["diagram_type"], "flow")
 
 
 if __name__ == "__main__":

@@ -74,6 +74,43 @@ class RehearsalPlan(BaseModel):
     tips: List[str] = Field(default_factory=list)
 
 
+class QAItem(BaseModel):
+    slide_index: Optional[int] = None
+    question: str = ""
+    answer: str = ""
+
+
+class QAPlan(BaseModel):
+    items: List[QAItem] = Field(default_factory=list)
+
+
+class SlideRevisionPlan(BaseModel):
+    target_slide_indexes: List[int] = Field(default_factory=list)
+    global_change: bool = False
+    summary: str = ""
+    revised_slides: List[DeckSlide] = Field(default_factory=list)
+
+
+class CanvasNode(BaseModel):
+    id: str
+    text: str
+    type: str = "process"
+
+
+class CanvasEdge(BaseModel):
+    source: str
+    target: str
+    label: str = ""
+
+
+class CanvasSpec(BaseModel):
+    title: str = ""
+    diagram_type: str = "flow"
+    nodes: List[CanvasNode] = Field(default_factory=list)
+    edges: List[CanvasEdge] = Field(default_factory=list)
+    layers: List[List[str]] = Field(default_factory=list)
+
+
 class LLMService:
     """LangChain wrapper for OpenAI-compatible chat completion providers."""
 
@@ -332,6 +369,29 @@ SYSTEM_PROMPTS = {
     "summarizer": """你是一个会议和讨论总结助手。分析 IM 对话上下文，提取核心话题、观点、共识、待办和决策。""",
 
     "rehearsal": """你是一个演讲排练助手。根据 PPT 内容生成每页讲稿、预计时间、可能的 Q&A 和提示要点。""",
+
+    "qa_generator": """你是一个答辩准备助手。根据演示稿内容生成听众最可能提出的问题和简洁回答。
+
+要求：
+- 问题必须和具体页面或整体方案相关
+- 回答要适合演示现场口头表达
+- 优先覆盖风险、价值、落地、数据、下一步等高频追问。""",
+
+    "slide_revision_planner": """你是一个 PPT 局部修改助手。根据用户反馈，只改需要修改的页面。
+
+要求：
+- target_slide_indexes 使用 0-based 下标
+- revised_slides 只返回被修改页面的完整内容
+- 不受影响的页面不要返回
+- 如果反馈明显影响整套演示稿，global_change=true。""",
+
+    "canvas_generator": """你是一个白板/自由画布规划助手。根据用户需求和文档内容生成可视化结构。
+
+要求：
+- 适合用流程图、架构图或层级图表达
+- diagram_type 使用 flow 或 architecture
+- flow 使用 nodes + edges
+- architecture 使用 layers。""",
 }
 
 SYSTEM_PROMPTS["doc_reviser"] = (
@@ -469,6 +529,131 @@ async def generate_rehearsal(deck_spec: Dict[str, Any]) -> Dict[str, Any]:
         [{"role": "user", "content": prompt}],
         RehearsalPlan,
         system_prompt=SYSTEM_PROMPTS["rehearsal"],
+        default=default,
+    ) or default
+
+
+async def generate_qa(deck_spec: Dict[str, Any], rehearsal: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    slides = deck_spec.get("slides", [])
+    default_items = []
+    for index, slide in enumerate(slides[:5]):
+        title = slide.get("title", f"第 {index + 1} 页") if isinstance(slide, dict) else f"第 {index + 1} 页"
+        default_items.append({
+            "slide_index": index,
+            "question": f"{title} 这一页最需要提前解释的问题是什么？",
+            "answer": "先说明该页的核心结论，再补充关键依据和下一步动作。",
+        })
+
+    prompt = (
+        f"# DeckSpec\n{json.dumps(deck_spec, ensure_ascii=False, indent=2)[:8000]}\n\n"
+        f"# Rehearsal\n{json.dumps(rehearsal or {}, ensure_ascii=False, indent=2)[:4000]}\n\n"
+        "# Task\nGenerate likely audience questions and concise answers."
+    )
+
+    return await llm_service.structured_chat(
+        [{"role": "user", "content": prompt}],
+        QAPlan,
+        system_prompt=SYSTEM_PROMPTS["qa_generator"],
+        default={"items": default_items},
+    ) or {"items": default_items}
+
+
+async def revise_targeted_slides(
+    title: str,
+    original_slides: List[Dict[str, Any]],
+    feedback: str,
+    target_slide_indexes: List[int],
+    audience: str = "management",
+    doc_content: str = "",
+) -> Dict[str, Any]:
+    valid_targets = [
+        index for index in target_slide_indexes
+        if 0 <= index < len(original_slides)
+    ]
+    if not valid_targets:
+        return {
+            "target_slide_indexes": [],
+            "global_change": True,
+            "summary": "No explicit slide target found; use full deck revision.",
+            "revised_slides": [],
+        }
+
+    target_slides = [original_slides[index] for index in valid_targets]
+    default_slides = []
+    for slide in target_slides:
+        revised = dict(slide)
+        bullets = list(revised.get("bullets") or [])
+        if feedback and not any(feedback in str(item) for item in bullets):
+            bullets.append(f"修改要求：{feedback}")
+        revised["bullets"] = bullets
+        default_slides.append(revised)
+
+    prompt = (
+        f"# Deck Title\n{title}\n\n"
+        f"# Audience\n{audience}\n\n"
+        f"# User Feedback\n{feedback}\n\n"
+        f"# Target Slide Indexes\n{valid_targets}\n\n"
+        f"# Target Slides\n{json.dumps(target_slides, ensure_ascii=False, indent=2)}\n\n"
+        f"# Full Deck Context\n{json.dumps(original_slides, ensure_ascii=False, indent=2)[:6000]}\n\n"
+        f"# Supporting Document\n{doc_content[:3000]}\n\n"
+        "# Task\nReturn only the revised target slides."
+    )
+
+    return await llm_service.structured_chat(
+        [{"role": "user", "content": prompt}],
+        SlideRevisionPlan,
+        system_prompt=SYSTEM_PROMPTS["slide_revision_planner"],
+        default={
+            "target_slide_indexes": valid_targets,
+            "global_change": False,
+            "summary": "Applied feedback to selected slides.",
+            "revised_slides": default_slides,
+        },
+    ) or {
+        "target_slide_indexes": valid_targets,
+        "global_change": False,
+        "summary": "Applied feedback to selected slides.",
+        "revised_slides": default_slides,
+    }
+
+
+async def generate_canvas_spec(
+    title: str,
+    intent: str,
+    doc_content: str = "",
+    steps: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    step_labels = [
+        str(step.get("action") or step.get("module") or f"Step {index + 1}")
+        for index, step in enumerate(steps or [])
+    ]
+    default_nodes = [
+        {"id": f"n{index + 1}", "text": label, "type": "process"}
+        for index, label in enumerate(step_labels or ["接收输入", "生成文档", "生成演示稿", "交付结果"])
+    ]
+    default_edges = [
+        {"source": default_nodes[index]["id"], "target": default_nodes[index + 1]["id"], "label": ""}
+        for index in range(max(len(default_nodes) - 1, 0))
+    ]
+    default = {
+        "title": title or "Agent-Pilot 结构图",
+        "diagram_type": "flow",
+        "nodes": default_nodes,
+        "edges": default_edges,
+        "layers": [],
+    }
+    prompt = (
+        f"# Title\n{title}\n\n"
+        f"# User Intent\n{intent}\n\n"
+        f"# Workflow Steps\n{json.dumps(steps or [], ensure_ascii=False, indent=2)}\n\n"
+        f"# Document\n{doc_content[:4000]}\n\n"
+        "# Task\nCreate a diagram spec for an AFFiNE canvas."
+    )
+
+    return await llm_service.structured_chat(
+        [{"role": "user", "content": prompt}],
+        CanvasSpec,
+        system_prompt=SYSTEM_PROMPTS["canvas_generator"],
         default=default,
     ) or default
 

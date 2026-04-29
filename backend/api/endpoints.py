@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.agent.orchestrator import agent_orchestrator
+from backend.config import settings
 from backend.api.schemas import (
     CreateSessionRequest,
     DocumentResponse,
@@ -87,10 +88,28 @@ def _looks_like_feedback(content: str) -> bool:
         "page",
         "slide",
         "ppt",
+        "排练",
+        "演练",
+        "讲稿",
+        "问答",
+        "q&a",
+        "qa",
+        "问题",
         "文档",
         "doc",
     ]
     return any(marker in text for marker in markers)
+
+
+def _room_can_mutate_task(task: Task, room_id: Optional[str]) -> bool:
+    """限制飞书侧跨群修改任务；网页本地请求不带 room_id 时保持兼容。"""
+    if not room_id:
+        return True
+    task_chat_id = None
+    if isinstance(task.result_json, dict):
+        task_chat_id = task.result_json.get("chat_id")
+    allowed_rooms = {item for item in [task_chat_id, settings.LARK_DEFAULT_CHAT_ID] if item}
+    return not allowed_rooms or room_id in allowed_rooms
 
 
 async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, Any]) -> None:
@@ -123,7 +142,7 @@ async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, A
         if not slide:
             slide = Slide(task_id=task.id)
             db.add(slide)
-        slide.slides_json = state["slides_content"].get("slides", [])
+        slide.slides_json = state["slides_content"]
         slide.file_path = state["slides_content"].get("file_path")
         slide.updated_at = datetime.utcnow()
 
@@ -230,10 +249,14 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             content=text,
         )
 
-        if feedback_target:
-            await manager.broadcast({
-                "type": "agent.message",
-                "task_id": feedback_target.id,
+    if feedback_target:
+        if not _room_can_mutate_task(feedback_target, message.get("chat_id")):
+            if message.get("chat_id") and lark_bot_service.is_configured:
+                await lark_bot_service.send_text(message["chat_id"], "该任务不属于当前聊天，已拒绝修改请求。")
+            return
+        await manager.broadcast({
+            "type": "agent.message",
+            "task_id": feedback_target.id,
                 "session_id": session.id,
                 "timestamp": datetime.utcnow().isoformat(),
                 "data": {
@@ -350,6 +373,8 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
             result = await db.execute(select(Task).where(Task.id == task_id))
             task = result.scalar_one_or_none()
             if task:
+                if not _room_can_mutate_task(task, action_value.get("chat_id", "")):
+                    raise HTTPException(status_code=403, detail="This room is not allowed to modify the task")
                 task.status = "completed"
                 task.updated_at = datetime.utcnow()
                 await db.commit()
@@ -363,6 +388,8 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
             result = await db.execute(select(Task).where(Task.id == task_id))
             task = result.scalar_one_or_none()
             if task:
+                if not _room_can_mutate_task(task, action_value.get("chat_id", "")):
+                    raise HTTPException(status_code=403, detail="This room is not allowed to modify the task")
                 task.status = "pending"
                 task.current_step = "confirm_or_modify"
                 task.updated_at = datetime.utcnow()
@@ -390,6 +417,11 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
                 doc_version = None
                 session_id = None
                 async with async_session_maker() as db:
+                    task_result = await db.execute(select(Task).where(Task.id == found_task_id))
+                    task_record = task_result.scalar_one_or_none()
+                    if task_record and not _room_can_mutate_task(task_record, action_value.get("chat_id", "")):
+                        raise HTTPException(status_code=403, detail="This room is not allowed to modify the task")
+
                     result = await db.execute(
                         select(Document).where(Document.lark_doc_id == doc_id)
                     )
@@ -400,8 +432,6 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
                         doc_record.version = (doc_record.version or 1) + 1
                         doc_version = doc_record.version
 
-                        task_result = await db.execute(select(Task).where(Task.id == found_task_id))
-                        task_record = task_result.scalar_one_or_none()
                         session_id = task_record.session_id if task_record else None
                         await db.commit()
 
@@ -600,6 +630,8 @@ async def send_message(
     )
 
     if feedback_target:
+        if not _room_can_mutate_task(feedback_target, request.room_id):
+            raise HTTPException(status_code=403, detail="This room is not allowed to modify the task")
         state = await agent_orchestrator.handle_user_feedback(
             session_id=session_id,
             task_id=feedback_target.id,

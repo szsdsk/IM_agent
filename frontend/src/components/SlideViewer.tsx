@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { useSessionStore } from '../store/useSessionStore'
+import type { FeedbackHistoryItem, QAItem, RehearsalSlide, SlideDeckPayload } from '../types'
 
 interface SlideViewerProps {
   className?: string
@@ -35,6 +37,7 @@ function getDownloadHref(filePath: string): string {
 
 export default function SlideViewer({ className = '' }: SlideViewerProps) {
   const { slides } = useSessionStore()
+  const [selectedIndex, setSelectedIndex] = useState(0)
 
   if (!slides) {
     return (
@@ -47,7 +50,15 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
     )
   }
 
-  const slidesData = Array.isArray(slides.slides_json) ? (slides.slides_json as SlideItem[]) : []
+  const deckPayload: SlideDeckPayload = Array.isArray(slides.slides_json)
+    ? { slides: slides.slides_json as SlideItem[] }
+    : ((slides.slides_json || {}) as SlideDeckPayload)
+  const slidesData = (deckPayload.slides || []) as SlideItem[]
+  const selectedSlide = slidesData[Math.min(selectedIndex, Math.max(slidesData.length - 1, 0))]
+  const rehearsalSlides = deckPayload.rehearsal?.slides || []
+  const selectedRehearsal = rehearsalSlides.find((item: RehearsalSlide) => item.slide_index === selectedIndex)
+  const selectedQa = (deckPayload.qa || []).filter((item: QAItem) => item.slide_index === selectedIndex || item.slide_index == null)
+  const feedbackHistory = deckPayload.feedback_history || deckPayload.metadata?.feedback_history || []
 
   return (
     <div className={`bg-white border rounded-lg shadow-sm overflow-hidden ${className}`}>
@@ -73,19 +84,82 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
 
       <div className="p-6 overflow-y-auto max-h-[600px]">
         {slidesData.length > 0 ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {slidesData.map((slide, index) => (
-              <div
-                key={index}
-                className="aspect-[4/3] border rounded-lg p-4 bg-gray-50 hover:shadow-md transition-shadow"
-              >
-                <div className="text-xs text-gray-500 mb-2">第 {index + 1} 页</div>
-                {slide.title && <h4 className="font-medium text-gray-800 mb-2">{slide.title}</h4>}
-                {getSlideText(slide) && (
-                  <p className="text-sm text-gray-600 whitespace-pre-wrap">{getSlideText(slide)}</p>
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {slidesData.map((slide, index) => (
+                <button
+                  type="button"
+                  key={index}
+                  onClick={() => setSelectedIndex(index)}
+                  className={`aspect-[4/3] rounded-lg border p-4 text-left transition-shadow hover:shadow-md ${
+                    selectedIndex === index ? 'border-blue-500 bg-blue-50' : 'bg-gray-50'
+                  }`}
+                >
+                  <div className="text-xs text-gray-500 mb-2">第 {index + 1} 页</div>
+                  {slide.title && <h4 className="font-medium text-gray-800 mb-2">{slide.title}</h4>}
+                  {getSlideText(slide) && (
+                    <p className="text-sm text-gray-600 whitespace-pre-wrap line-clamp-6">{getSlideText(slide)}</p>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            {selectedSlide && (
+              <div className="rounded-lg border bg-white p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs text-gray-500">单页详情</p>
+                    <h4 className="font-semibold text-gray-800">
+                      第 {selectedIndex + 1} 页：{selectedSlide.title || '未命名'}
+                    </h4>
+                  </div>
+                  {selectedRehearsal?.duration_seconds && (
+                    <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">
+                      预计 {selectedRehearsal.duration_seconds}s
+                    </span>
+                  )}
+                </div>
+
+                {selectedRehearsal?.speaker_notes && (
+                  <div className="mb-3 rounded-md bg-amber-50 p-3">
+                    <p className="mb-1 text-xs font-medium text-amber-700">演练讲稿</p>
+                    <p className="whitespace-pre-wrap text-sm text-gray-700">{selectedRehearsal.speaker_notes}</p>
+                  </div>
+                )}
+
+                {selectedQa.length > 0 && (
+                  <div className="mb-3 rounded-md bg-blue-50 p-3">
+                    <p className="mb-2 text-xs font-medium text-blue-700">可能 Q&A</p>
+                    <div className="space-y-2">
+                      {selectedQa.slice(0, 4).map((item, index) => (
+                        <div key={`${item.question}-${index}`} className="text-sm text-gray-700">
+                          <p className="font-medium">Q：{item.question}</p>
+                          <p>A：{item.answer}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {feedbackHistory.length > 0 && (
+                  <div className="rounded-md bg-gray-50 p-3">
+                    <p className="mb-2 text-xs font-medium text-gray-600">最近修改</p>
+                    <div className="space-y-1 text-xs text-gray-600">
+                      {(feedbackHistory as FeedbackHistoryItem[]).slice(-3).reverse().map((item, index) => (
+                        <p key={`${item.created_at}-${index}`}>
+                          {item.target_slide_numbers?.length
+                            ? `第 ${item.target_slide_numbers.join('、')} 页`
+                            : item.mode === 'global'
+                              ? '全局'
+                              : '未指定页'}
+                          ：{item.feedback}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
-            ))}
+            )}
           </div>
         ) : (
           <div className="text-center text-gray-400 py-12">PPT 正在生成中...</div>

@@ -34,9 +34,56 @@ export interface Document {
 export interface Slide {
   id: string
   task_id: string
-  slides_json: Record<string, any> | any[] | null
+  slides_json: SlideDeckPayload | any[] | null
   file_path: string | null
   created_at: string
+}
+
+export interface SlideDeckPayload {
+  title?: string
+  slides?: Record<string, any>[]
+  metadata?: Record<string, any>
+  rehearsal?: RehearsalPlan | null
+  qa?: QAItem[]
+  feedback_history?: FeedbackHistoryItem[]
+}
+
+export interface RehearsalPlan {
+  slides?: RehearsalSlide[]
+  total_duration_minutes?: number
+  tips?: string[]
+}
+
+export interface RehearsalSlide {
+  slide_index: number
+  speaker_notes: string
+  duration_seconds?: number
+  qa_questions?: string[]
+}
+
+export interface QAItem {
+  slide_index?: number | null
+  question: string
+  answer: string
+}
+
+export interface FeedbackHistoryItem {
+  feedback: string
+  target_slide_indexes?: number[]
+  target_slide_numbers?: number[]
+  mode?: string
+  created_at?: string
+}
+
+export interface CanvasArtifact {
+  canvas_id?: string
+  title?: string
+  provider?: string
+  url?: string | null
+  diagram_type?: string
+  nodes?: Array<Record<string, any>>
+  edges?: Array<Record<string, any>>
+  layers?: string[][]
 }
 
 export interface Health {

@@ -37,11 +37,17 @@ export const api = {
     sessionId: string,
     content: string,
     userId?: string,
-    presentationScene?: PresentationScene
+    presentationScene?: PresentationScene,
+    feedbackTaskId?: string
   ): Promise<Task> {
     return fetchAPI<Task>(`/sessions/${sessionId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ content, user_id: userId, presentation_scene: presentationScene }),
+      body: JSON.stringify({
+        content,
+        user_id: userId,
+        presentation_scene: presentationScene,
+        feedback_task_id: feedbackTaskId,
+      }),
     })
   },
 

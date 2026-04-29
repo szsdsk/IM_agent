@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -14,6 +15,7 @@ from backend.services.lark_bot_service import (
     lark_bot_service,
 )
 from backend.services.llm_service import revise_deck_spec, revise_doc_content
+from backend.services.llm_service import generate_qa, generate_rehearsal, revise_targeted_slides
 from backend.services.rocket_chat_service import (
     fetch_im_context,
     post_delivery_to_im,
@@ -304,6 +306,7 @@ class AgentOrchestrator:
                     await lark_bot_service.send_text(room_id, self._build_lark_delivery_text(state))
 
                 await self._push_lark_delivery_files(room_id, state)
+                await self._push_lark_rehearsal_summary(room_id, state)
                 return
 
             if not rocket_chat_service.is_configured:
@@ -362,6 +365,39 @@ class AgentOrchestrator:
         except Exception as exc:
             logger.warning("Failed to upload/send Lark PPT for task %s: %s", state["task_id"], str(exc))
 
+    async def _push_lark_rehearsal_summary(self, room_id: str, state: AgentState) -> None:
+        result = state.get("result") or {}
+        slides = result.get("slides") or result.get("deck")
+        if not isinstance(slides, dict):
+            return
+
+        rehearsal = slides.get("rehearsal") or {}
+        qa_items = slides.get("qa") or []
+        rehearsal_slides = rehearsal.get("slides") if isinstance(rehearsal, dict) else []
+        if not rehearsal_slides and not qa_items:
+            return
+
+        lines = ["演练摘要"]
+        for item in (rehearsal_slides or [])[:3]:
+            slide_no = int(item.get("slide_index", 0)) + 1
+            notes = str(item.get("speaker_notes") or "").strip()
+            if notes:
+                lines.append(f"- 第 {slide_no} 页：{notes[:80]}")
+        if qa_items:
+            lines.append("\nTop Q&A")
+            for item in qa_items[:3]:
+                question = str(item.get("question") or "").strip()
+                answer = str(item.get("answer") or "").strip()
+                if question:
+                    lines.append(f"- Q：{question}")
+                if answer:
+                    lines.append(f"  A：{answer[:100]}")
+
+        try:
+            await lark_bot_service.send_text(room_id, "\n".join(lines))
+        except Exception as exc:
+            logger.warning("Failed to send Lark rehearsal summary for task %s: %s", state["task_id"], str(exc))
+
     async def handle_user_feedback(
         self,
         session_id: str,
@@ -407,6 +443,7 @@ class AgentOrchestrator:
             base_slides = base_result.get("slides") or base_result.get("deck") or {}
             should_update_doc = self._should_update_doc(feedback, base_doc, base_slides)
             should_update_slides = self._should_update_slides(feedback, base_doc, base_slides)
+            wants_rehearsal = self._wants_rehearsal(feedback)
 
             if isinstance(base_doc, dict) and should_update_doc:
                 await publish("generate_doc", 0.4, "Regenerating document with feedback")
@@ -443,32 +480,84 @@ class AgentOrchestrator:
                     "doc_url": base_doc.get("doc_url"),
                 }
 
-            if isinstance(base_slides, dict) and should_update_slides:
+            if isinstance(base_slides, dict) and (should_update_slides or wants_rehearsal):
                 await publish("generate_slides", 0.75, "Regenerating presentation with feedback")
                 slides = base_slides.get("slides") or []
-                revised_spec = await revise_deck_spec(
-                    title=base_slides.get("title") or state.get("doc_content", {}).get("title") or f"Task {task_id} deck",
-                    original_slides=slides,
-                    feedback=feedback,
-                    audience="management",
-                    doc_content=(state.get("doc_content") or {}).get("content", ""),
-                )
-                result = await ToolFactory.invoke_tool(
-                    "PPTTool",
-                    {
-                        "action": "create_slides",
-                        "task_id": task_id,
-                        "title": revised_spec.get("title"),
-                        "slides": revised_spec.get("slides", []),
-                    },
-                )
-                if not result.get("success"):
-                    raise RuntimeError(result.get("error") or "Failed to regenerate slides")
+                target_indexes = self._extract_slide_indexes(feedback, len(slides))
+                title = base_slides.get("title") or state.get("doc_content", {}).get("title") or f"Task {task_id} deck"
+                doc_content = (state.get("doc_content") or {}).get("content", "")
+                metadata = dict(base_slides.get("metadata") or {})
+
+                if should_update_slides:
+                    if target_indexes:
+                        revision = await revise_targeted_slides(
+                            title=title,
+                            original_slides=slides,
+                            feedback=feedback,
+                            target_slide_indexes=target_indexes,
+                            audience=base_slides.get("audience") or "management",
+                            doc_content=doc_content,
+                        )
+                        if revision.get("global_change"):
+                            revised_spec = await revise_deck_spec(
+                                title=title,
+                                original_slides=slides,
+                                feedback=feedback,
+                                audience=base_slides.get("audience") or "management",
+                                doc_content=doc_content,
+                            )
+                        else:
+                            revised_slides = self._merge_revised_slides(slides, revision)
+                            revised_spec = self._build_deck_spec(title, base_slides, revised_slides, metadata)
+                    else:
+                        revised_spec = await revise_deck_spec(
+                            title=title,
+                            original_slides=slides,
+                            feedback=feedback,
+                            audience=base_slides.get("audience") or "management",
+                            doc_content=doc_content,
+                        )
+                        target_indexes = list(range(len(slides)))
+
+                    metadata = self._updated_slide_metadata(
+                        previous=metadata,
+                        feedback=feedback,
+                        target_indexes=target_indexes,
+                        old_file_path=base_slides.get("file_path"),
+                        mode="targeted" if target_indexes and len(target_indexes) < len(slides) else "global",
+                    )
+                    revised_spec["metadata"] = {**(revised_spec.get("metadata") or {}), **metadata}
+                    result = await ToolFactory.invoke_tool(
+                        "PPTTool",
+                        {
+                            "action": "create_slides",
+                            "task_id": task_id,
+                            "title": revised_spec.get("title"),
+                            "slides": revised_spec.get("slides", []),
+                            "deck_spec": revised_spec,
+                        },
+                    )
+                    if not result.get("success"):
+                        raise RuntimeError(result.get("error") or "Failed to regenerate slides")
+                    file_path = result.get("download_url") or result.get("file_path")
+                else:
+                    revised_spec = self._build_deck_spec(title, base_slides, slides, metadata)
+                    file_path = base_slides.get("file_path")
+
+                rehearsal = await generate_rehearsal(revised_spec)
+                qa = await generate_qa(revised_spec, rehearsal)
                 state["slides_content"] = {
-                    "slide_id": result.get("slide_id"),
+                    "slide_id": result.get("slide_id") if should_update_slides else base_slides.get("slide_id"),
                     "title": revised_spec.get("title"),
                     "slides": revised_spec.get("slides", []),
-                    "file_path": result.get("download_url") or result.get("file_path"),
+                    "file_path": file_path,
+                    "theme": revised_spec.get("theme"),
+                    "audience": revised_spec.get("audience"),
+                    "duration_minutes": revised_spec.get("duration_minutes"),
+                    "metadata": revised_spec.get("metadata", {}),
+                    "rehearsal": rehearsal,
+                    "qa": qa.get("items", []),
+                    "feedback_history": revised_spec.get("metadata", {}).get("feedback_history", base_slides.get("feedback_history", [])),
                 }
             elif isinstance(base_slides, dict) and base_slides:
                 state["slides_content"] = {
@@ -476,6 +565,13 @@ class AgentOrchestrator:
                     "title": base_slides.get("title"),
                     "slides": base_slides.get("slides", []),
                     "file_path": base_slides.get("file_path"),
+                    "theme": base_slides.get("theme"),
+                    "audience": base_slides.get("audience"),
+                    "duration_minutes": base_slides.get("duration_minutes"),
+                    "metadata": base_slides.get("metadata", {}),
+                    "rehearsal": base_slides.get("rehearsal"),
+                    "qa": base_slides.get("qa", []),
+                    "feedback_history": base_slides.get("feedback_history", []),
                 }
 
             if base_result.get("canvas"):
@@ -541,11 +637,116 @@ class AgentOrchestrator:
         text = feedback.lower()
         slide_markers = ["ppt", "slide", "slides", "deck", "页", "第", "演示", "汇报"]
         doc_markers = ["doc", "document", "文档", "需求", "prd", "说明", "总结"]
+        rehearsal_markers = ["排练", "演练", "讲稿", "speaker", "notes", "q&a", "qa", "问答", "问题"]
+        update_markers = ["改", "修改", "调整", "增加", "删除", "优化", "替换", "补充", "更新"]
+        if any(marker in text for marker in rehearsal_markers) and not any(marker in text for marker in update_markers):
+            return False
         if any(marker in text for marker in slide_markers):
             return True
         if any(marker in text for marker in doc_markers):
             return False
         return bool(base_slides)
+
+    @staticmethod
+    def _wants_rehearsal(feedback: str) -> bool:
+        text = feedback.lower()
+        markers = ["排练", "演练", "讲稿", "speaker", "notes", "q&a", "qa", "问答", "问题"]
+        return any(marker in text for marker in markers)
+
+    @classmethod
+    def _extract_slide_indexes(cls, feedback: str, slides_count: int) -> List[int]:
+        if slides_count <= 0:
+            return []
+        text = feedback.lower()
+        values: List[int] = []
+        patterns = [
+            r"第\s*([0-9一二两三四五六七八九十百]+)\s*[页張张]",
+            r"(?:slide|page|p)\s*#?\s*([0-9]+)",
+            r"([0-9]+)\s*[页張张]",
+        ]
+        for pattern in patterns:
+            for match in re.findall(pattern, text, flags=re.IGNORECASE):
+                parsed = cls._parse_slide_number(match)
+                if parsed is not None:
+                    values.append(parsed - 1)
+        return sorted({index for index in values if 0 <= index < slides_count})
+
+    @staticmethod
+    def _parse_slide_number(value: Any) -> Optional[int]:
+        text = str(value).strip()
+        if text.isdigit():
+            return int(text)
+        digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        if text in digits:
+            return digits[text]
+        if "十" in text:
+            left, _, right = text.partition("十")
+            tens = digits.get(left, 1) if left else 1
+            ones = digits.get(right, 0) if right else 0
+            return tens * 10 + ones
+        return None
+
+    @staticmethod
+    def _merge_revised_slides(original_slides: List[Dict[str, Any]], revision: Dict[str, Any]) -> List[Dict[str, Any]]:
+        merged = [dict(slide) for slide in original_slides]
+        target_indexes = revision.get("target_slide_indexes") or []
+        revised_slides = revision.get("revised_slides") or []
+        for fallback_index, revised in zip(target_indexes, revised_slides):
+            candidate = revised.get("index") if isinstance(revised, dict) else None
+            index = int(candidate) if candidate in target_indexes else int(fallback_index)
+            if 0 <= index < len(merged):
+                merged[index] = {**merged[index], **dict(revised), "index": index}
+        return merged
+
+    @staticmethod
+    def _build_deck_spec(
+        title: str,
+        base_slides: Dict[str, Any],
+        slides: List[Dict[str, Any]],
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "title": title,
+            "audience": base_slides.get("audience") or "management",
+            "duration_minutes": base_slides.get("duration_minutes") or max(len(slides), 1),
+            "theme": base_slides.get("theme") or "business_blue",
+            "metadata": metadata,
+            "slides": [
+                nodes._normalize_slide_for_frontend(slide, index)
+                for index, slide in enumerate(slides)
+            ],
+        }
+
+    @staticmethod
+    def _updated_slide_metadata(
+        previous: Dict[str, Any],
+        feedback: str,
+        target_indexes: List[int],
+        old_file_path: Optional[str],
+        mode: str,
+    ) -> Dict[str, Any]:
+        metadata = dict(previous or {})
+        history = list(metadata.get("feedback_history") or [])
+        versions = list(metadata.get("versions") or [])
+        updated_at = datetime.utcnow().isoformat()
+        history.append({
+            "feedback": feedback,
+            "target_slide_indexes": target_indexes,
+            "target_slide_numbers": [index + 1 for index in target_indexes],
+            "mode": mode,
+            "created_at": updated_at,
+        })
+        if old_file_path:
+            versions.append({
+                "version": len(versions) + 1,
+                "file_path": old_file_path,
+                "created_at": updated_at,
+            })
+        metadata["feedback_history"] = history
+        metadata["versions"] = versions
+        metadata["revision_count"] = len(history)
+        metadata["last_feedback_at"] = updated_at
+        return metadata
 
 
 agent_orchestrator = AgentOrchestrator()

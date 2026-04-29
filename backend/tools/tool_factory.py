@@ -1,3 +1,4 @@
+from backend.tools.canvas_tool import CanvasTool
 from backend.tools.doc_tool import DocTool
 from backend.tools.im_tool import IMTool
 from backend.tools.ppt_tool import PPTTool
@@ -15,6 +16,8 @@ class ToolFactory:
                 cls._tools[tool_name] = DocTool()
             elif tool_name == "PPTTool":
                 cls._tools[tool_name] = PPTTool()
+            elif tool_name == "CanvasTool":
+                cls._tools[tool_name] = CanvasTool()
             else:
                 raise ValueError(f"Unknown tool: {tool_name}")
         return cls._tools[tool_name]
@@ -33,6 +36,7 @@ class ToolFactory:
             "IMTool": cls.get_tool("IMTool"),
             "DocTool": cls.get_tool("DocTool"),
             "PPTTool": cls.get_tool("PPTTool"),
+            "CanvasTool": cls.get_tool("CanvasTool"),
         }
 
     @classmethod
@@ -41,4 +45,5 @@ class ToolFactory:
             "IMTool": cls.get_langchain_tool("IMTool"),
             "DocTool": cls.get_langchain_tool("DocTool"),
             "PPTTool": cls.get_langchain_tool("PPTTool"),
+            "CanvasTool": cls.get_langchain_tool("CanvasTool"),
         }

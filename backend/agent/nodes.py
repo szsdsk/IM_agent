@@ -10,11 +10,15 @@ from typing import Any, Dict
 
 from backend.agent.state import AgentState
 from backend.services.llm_service import (
+    generate_canvas_spec,
     generate_deck_spec,
     generate_doc_content,
+    generate_qa,
+    generate_rehearsal,
     parse_intent as llm_parse_intent,
     plan_workflow as llm_plan_workflow,
 )
+from backend.services.delivery_service import archive_task
 from backend.tools.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
@@ -315,12 +319,50 @@ async def generate_doc(state: AgentState) -> AgentState:
 
 
 async def generate_canvas(state: AgentState) -> AgentState:
-    """生成画布/白板占位结果。"""
+    """生成画布/白板结果。"""
     _touch(state, "generate_canvas", 0.6)
 
     _append_message(state, "assistant", "正在生成流程图/结构图...", "generate_canvas")
-    state["canvas_content"] = {"canvas_id": f"canvas_{state['task_id']}", "type": "architecture_diagram"}
-    _append_message(state, "assistant", "结构图已生成", "generate_canvas")
+    try:
+        spec = await generate_canvas_spec(
+            title=state.get("intent", "Agent-Pilot 画布"),
+            intent=state.get("intent", ""),
+            doc_content=(state.get("doc_content") or {}).get("content", ""),
+            steps=state.get("steps", []),
+        )
+        diagram_type = spec.get("diagram_type") or "flow"
+        action = "create_architecture_diagram" if diagram_type == "architecture" else "create_flow_diagram"
+        result = await ToolFactory.invoke_tool(
+            "CanvasTool",
+            {
+                "action": action,
+                "task_id": state["task_id"],
+                "title": spec.get("title") or state.get("intent"),
+                "nodes": spec.get("nodes", []),
+                "edges": spec.get("edges", []),
+                "layers": spec.get("layers", []),
+            },
+        )
+        if not result.get("success"):
+            state["error"] = f"画布生成失败: {result.get('error')}"
+            _append_message(state, "assistant", state["error"], "generate_canvas")
+            return state
+
+        state["canvas_content"] = {
+            "canvas_id": result.get("canvas_id"),
+            "title": result.get("title") or spec.get("title"),
+            "provider": result.get("provider"),
+            "url": result.get("url"),
+            "diagram_type": result.get("diagram_type") or diagram_type,
+            "nodes": result.get("nodes") or spec.get("nodes", []),
+            "edges": result.get("edges") or spec.get("edges", []),
+            "layers": result.get("layers") or spec.get("layers", []),
+        }
+        _append_message(state, "assistant", "结构图已生成", "generate_canvas")
+    except Exception as exc:
+        logger.exception("Error generating canvas")
+        state["error"] = str(exc)
+        _append_message(state, "assistant", f"画布生成失败: {str(exc)}", "generate_canvas")
 
     return state
 
@@ -343,6 +385,12 @@ async def generate_slides(state: AgentState) -> AgentState:
             audience=audience,
             presentation_scene=presentation_scene,
         )
+        metadata = dict(deck_spec.get("metadata", {}))
+        metadata.setdefault("feedback_history", [])
+        metadata.setdefault("versions", [])
+        deck_spec["metadata"] = metadata
+        rehearsal = await generate_rehearsal(deck_spec)
+        qa = await generate_qa(deck_spec, rehearsal)
         state["deck_spec"] = deck_spec
 
         raw_slides = deck_spec.get("slides", [])
@@ -368,6 +416,13 @@ async def generate_slides(state: AgentState) -> AgentState:
                 "title": deck_spec.get("title"),
                 "slides": slides,
                 "file_path": result.get("download_url") or result.get("file_path"),
+                "theme": deck_spec.get("theme"),
+                "audience": deck_spec.get("audience"),
+                "duration_minutes": deck_spec.get("duration_minutes"),
+                "metadata": metadata,
+                "rehearsal": rehearsal,
+                "qa": qa.get("items", []),
+                "feedback_history": [],
             }
             state["slide_id"] = result.get("slide_id")
 
@@ -438,12 +493,35 @@ async def deliver_result(state: AgentState) -> AgentState:
             "slides": state["slides_content"].get("slides", []),
             "slides_count": len(state["slides_content"].get("slides", [])),
             "file_path": state["slides_content"].get("file_path"),
+            "theme": state["slides_content"].get("theme"),
+            "audience": state["slides_content"].get("audience"),
+            "duration_minutes": state["slides_content"].get("duration_minutes"),
+            "metadata": state["slides_content"].get("metadata", {}),
+            "rehearsal": state["slides_content"].get("rehearsal"),
+            "qa": state["slides_content"].get("qa", []),
+            "feedback_history": state["slides_content"].get("feedback_history", []),
         }
         delivery["slides"] = slides_payload
         delivery["deck"] = slides_payload
 
     if state.get("canvas_content"):
-        delivery["canvas"] = {"canvas_id": state["canvas_content"].get("canvas_id")}
+        delivery["canvas"] = state["canvas_content"]
+
+    if state["status"] == "completed":
+        try:
+            archive = await archive_task(
+                task_id=state["task_id"],
+                title=state.get("intent", "Agent-Pilot 任务"),
+                doc_id=(state.get("doc_content") or {}).get("doc_id"),
+                slide_id=(state.get("slides_content") or {}).get("slide_id"),
+                canvas_id=(state.get("canvas_content") or {}).get("canvas_id"),
+                files=[{"type": "pptx", "path": (state.get("slides_content") or {}).get("file_path")}]
+                if (state.get("slides_content") or {}).get("file_path")
+                else [],
+            )
+            delivery["archive"] = archive.to_dict()
+        except Exception as exc:
+            logger.warning("Failed to archive task %s: %s", state["task_id"], str(exc))
 
     state["result"] = delivery
 

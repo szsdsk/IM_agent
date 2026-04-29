@@ -3,6 +3,7 @@ import AgentStatus from './components/AgentStatus'
 import ProgressTimeline from './components/ProgressTimeline'
 import DocViewer from './components/DocViewer'
 import SlideViewer from './components/SlideViewer'
+import CanvasViewer from './components/CanvasViewer'
 import VoiceTranscriber from './components/VoiceTranscriber'
 import { api } from './services/api'
 import { wsService } from './services/websocket'
@@ -101,6 +102,7 @@ export default function App() {
 
           <div className="lg:col-span-6 space-y-6">
             <DocViewer />
+            <CanvasViewer />
             <SlideViewer />
           </div>
         </div>

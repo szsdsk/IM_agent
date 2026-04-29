@@ -71,6 +71,19 @@ class WebSocketService {
 
     switch (data.type) {
       case 'task.progress':
+        if (data.task_id) {
+          store.setTask({
+            id: data.task_id,
+            session_id: data.session_id || this.sessionId || '',
+            intent: store.task?.intent || '',
+            status: (data.status as any) || 'running',
+            current_step: data.step || store.currentStep,
+            progress: data.progress ?? store.progress,
+            result_json: store.task?.result_json || null,
+            created_at: store.task?.created_at || data.timestamp,
+            updated_at: data.timestamp,
+          })
+        }
         if (data.step) store.setCurrentStep(data.step)
         if (data.progress !== undefined) store.setProgress(data.progress)
         if (data.status) store.setStatus(data.status as SessionStatus)
@@ -91,6 +104,21 @@ class WebSocketService {
         store.setProgress(1)
         const resultDoc = data.result?.doc || data.result?.document
         const resultSlides = data.result?.slides || data.result?.deck
+        const resultCanvas = data.result?.canvas
+
+        if (data.task_id) {
+          store.setTask({
+            id: data.task_id,
+            session_id: data.session_id || this.sessionId || '',
+            intent: store.task?.intent || '',
+            status: 'completed',
+            current_step: 'deliver_result',
+            progress: 1,
+            result_json: data.result || null,
+            created_at: store.task?.created_at || data.timestamp,
+            updated_at: data.timestamp,
+          })
+        }
 
         if (resultDoc) {
           store.setDoc({
@@ -106,10 +134,13 @@ class WebSocketService {
           store.setSlides({
             id: resultSlides.slide_id || data.task_id || `slide-${Date.now()}`,
             task_id: data.task_id || '',
-            slides_json: resultSlides.slides || [],
+            slides_json: resultSlides,
             file_path: resultSlides.file_path || null,
             created_at: data.timestamp,
           })
+        }
+        if (resultCanvas) {
+          store.setCanvas(resultCanvas)
         }
         store.addMessage({
           id: `msg-${Date.now()}`,
@@ -122,6 +153,19 @@ class WebSocketService {
       case 'task.failed':
         store.setStatus('failed')
         store.setProgress(0)
+        if (data.task_id) {
+          store.setTask({
+            id: data.task_id,
+            session_id: data.session_id || this.sessionId || '',
+            intent: store.task?.intent || '',
+            status: 'failed',
+            current_step: store.currentStep,
+            progress: 0,
+            result_json: null,
+            created_at: store.task?.created_at || data.timestamp,
+            updated_at: data.timestamp,
+          })
+        }
         store.addMessage({
           id: `msg-${Date.now()}`,
           role: 'system',

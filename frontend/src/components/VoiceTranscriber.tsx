@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../services/api'
 import { wsService } from '../services/websocket'
 import { useSessionStore } from '../store/useSessionStore'
@@ -11,6 +11,52 @@ const sceneOptions: Array<{ value: PresentationScene; label: string }> = [
   { value: 'postmortem', label: '复盘总结' },
   { value: 'training', label: '培训讲解' },
 ]
+
+const QUEUE_KEY = 'agent-pilot-pending-messages'
+
+interface PendingMessage {
+  content: string
+  presentationScene: PresentationScene
+  feedbackTaskId?: string
+  createdAt: string
+}
+
+function isFeedbackLike(content: string): boolean {
+  const text = content.toLowerCase()
+  return [
+    '改',
+    '修改',
+    '调整',
+    '优化',
+    '替换',
+    '删除',
+    '增加',
+    '补充',
+    '第',
+    '页',
+    'slide',
+    'ppt',
+    '排练',
+    '演练',
+    '讲稿',
+    'q&a',
+    'qa',
+    '问答',
+  ].some((marker) => text.includes(marker))
+}
+
+function loadPendingMessages(): PendingMessage[] {
+  try {
+    const raw = window.localStorage.getItem(QUEUE_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function savePendingMessages(messages: PendingMessage[]): void {
+  window.localStorage.setItem(QUEUE_KEY, JSON.stringify(messages))
+}
 
 function mixToMono(buffer: AudioBuffer): Float32Array<ArrayBufferLike> {
   if (buffer.numberOfChannels === 1) return buffer.getChannelData(0)
@@ -68,7 +114,7 @@ export default function VoiceTranscriber() {
   const streamRef = useRef<MediaStream | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
-  const { messages, sessionId, status, setSessionId, setTask, addMessage } = useSessionStore()
+  const { messages, sessionId, task, status, setSessionId, setTask, addMessage } = useSessionStore()
 
   const stopTracks = () => {
     recorderRef.current?.stream.getTracks().forEach((t) => t.stop())
@@ -93,15 +139,28 @@ export default function VoiceTranscriber() {
     setSending(true)
     setDraft('')
     try {
-      const activeSessionId = await ensureSession()
+      const feedbackTaskId = task?.id && isFeedbackLike(content) ? task.id : undefined
       addMessage({
         id: `user-${Date.now()}`,
         role: 'user',
         content,
         timestamp: new Date().toISOString(),
       })
-      const task = await api.sendMessage(activeSessionId, content, undefined, presentationScene)
-      setTask(task)
+      if (!navigator.onLine) {
+        const pending = loadPendingMessages()
+        pending.push({ content, presentationScene, feedbackTaskId, createdAt: new Date().toISOString() })
+        savePendingMessages(pending)
+        addMessage({
+          id: `offline-${Date.now()}`,
+          role: 'system',
+          content: '当前离线，消息已暂存，恢复网络后会自动发送。',
+          timestamp: new Date().toISOString(),
+        })
+        return
+      }
+      const activeSessionId = await ensureSession()
+      const nextTask = await api.sendMessage(activeSessionId, content, undefined, presentationScene, feedbackTaskId)
+      setTask(nextTask)
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     } catch (e) {
       setError(e instanceof Error ? e.message : '发送失败')
@@ -109,6 +168,42 @@ export default function VoiceTranscriber() {
       setSending(false)
     }
   }
+
+  useEffect(() => {
+    const flushPending = async () => {
+      if (!navigator.onLine) return
+      const pending = loadPendingMessages()
+      if (!pending.length) return
+      try {
+        const activeSessionId = await ensureSession()
+        savePendingMessages([])
+        for (const item of pending) {
+          const nextTask = await api.sendMessage(
+            activeSessionId,
+            item.content,
+            undefined,
+            item.presentationScene,
+            item.feedbackTaskId
+          )
+          setTask(nextTask)
+        }
+        addMessage({
+          id: `online-${Date.now()}`,
+          role: 'system',
+          content: `已发送 ${pending.length} 条离线暂存消息。`,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (e) {
+        savePendingMessages(pending)
+        setError(e instanceof Error ? e.message : '离线消息补发失败')
+      }
+    }
+
+    window.addEventListener('online', flushPending)
+    flushPending()
+    return () => window.removeEventListener('online', flushPending)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
 
   const handleRecord = async () => {
     setError('')
