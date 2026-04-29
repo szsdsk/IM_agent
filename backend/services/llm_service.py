@@ -622,6 +622,7 @@ async def generate_canvas_spec(
     intent: str,
     doc_content: str = "",
     steps: Optional[List[Dict[str, Any]]] = None,
+    use_llm: bool = True,
 ) -> Dict[str, Any]:
     step_labels = [
         str(step.get("action") or step.get("module") or f"Step {index + 1}")
@@ -642,6 +643,9 @@ async def generate_canvas_spec(
         "edges": default_edges,
         "layers": [],
     }
+    if not use_llm:
+        return default
+
     prompt = (
         f"# Title\n{title}\n\n"
         f"# User Intent\n{intent}\n\n"

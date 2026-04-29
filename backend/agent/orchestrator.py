@@ -27,6 +27,19 @@ from backend.tools.tool_factory import ToolFactory
 logger = logging.getLogger(__name__)
 
 
+STEP_PROGRESS = {
+    "receive_input": 0.05,
+    "parse_intent": 0.12,
+    "plan_workflow": 0.2,
+    "extract_tasks": 0.3,
+    "generate_doc": 0.5,
+    "generate_canvas": 0.6,
+    "generate_slides": 0.7,
+    "confirm_or_modify": 0.85,
+    "deliver_result": 1.0,
+}
+
+
 class AgentOrchestrator:
     def __init__(self):
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
@@ -178,6 +191,17 @@ class AgentOrchestrator:
                     if isinstance(node_update, dict):
                         current_state = AgentState(**{**current_state, **node_update})
                     await self._publish_progress(room_id, task_id, current_state, ws_sender)
+                    next_step = self._next_step_after(node_name, current_state)
+                    if next_step and not current_state.get("error") and current_state.get("status") != "completed":
+                        current_state = AgentState(
+                            **{
+                                **current_state,
+                                "current_step": next_step,
+                                "progress": STEP_PROGRESS.get(next_step, current_state.get("progress", 0)),
+                                "updated_at": datetime.utcnow().isoformat(),
+                            }
+                        )
+                        await self._publish_step_start(task_id, current_state, ws_sender)
         except Exception as exc:
             logger.exception("LangGraph workflow failed for task %s", task_id)
             current_state["error"] = str(exc)
@@ -209,6 +233,58 @@ class AgentOrchestrator:
             pass
 
         return current_state
+
+    def _next_step_after(self, node_name: str, state: AgentState) -> Optional[str]:
+        """预测下一节点，用于长耗时节点开始前先刷新前端状态。"""
+        if node_name == "receive_input":
+            return "parse_intent"
+        if node_name == "parse_intent":
+            return "plan_workflow"
+        if node_name == "plan_workflow":
+            return "extract_tasks"
+        if node_name == "extract_tasks":
+            return self._route_after_extract(state)
+        if node_name == "generate_doc":
+            return self._route_after_doc(state)
+        if node_name == "generate_canvas":
+            return self._route_after_canvas(state)
+        if node_name == "generate_slides":
+            return self._route_after_slides(state)
+        if node_name == "confirm_or_modify":
+            return "deliver_result"
+        return None
+
+    async def _publish_step_start(
+        self,
+        task_id: str,
+        state: AgentState,
+        ws_sender: Callable = None,
+    ) -> None:
+        """只给前端和同步通道发送“下一步已开始”，避免 IM 端被刷屏。"""
+        progress_message = {
+            "type": "task.progress",
+            "task_id": task_id,
+            "step": state.get("current_step"),
+            "message": f"Executing: {state.get('current_step')}",
+            "progress": state.get("progress"),
+            "status": state.get("status"),
+            "timestamp": state.get("updated_at"),
+            "updated_at": state.get("updated_at"),
+        }
+        if ws_sender:
+            await ws_sender(progress_message)
+        await self.trigger_callback("progress", progress_message)
+
+        try:
+            await sync_service.broadcast_task_progress(
+                session_id=state.get("session_id", ""),
+                task_id=task_id,
+                step=state.get("current_step", ""),
+                progress=state.get("progress", 0),
+                message=f"Executing: {state.get('current_step')}",
+            )
+        except Exception:
+            pass
 
     async def _publish_progress(
         self,
@@ -255,14 +331,17 @@ class AgentOrchestrator:
                 card = build_progress_card(task_id, state.get("current_step", ""), state.get("progress", 0))
                 result = await lark_bot_service.send_card(room_id, card)
                 if not result.get("success"):
-                    # Fallback to text
+                    logger.warning("Failed to send Lark progress card: %s", result.get("error"))
+                    # 卡片发送失败时退回普通文本，保证飞书侧仍能看到任务进展。
                     text = (
                         "Agent-Pilot 任务进行中\n"
                         f"进度: {int(float(state.get('progress', 0)) * 100)}%\n"
                         f"步骤: {state.get('current_step')}\n"
                         f"任务: {task_id}"
                     )
-                    await lark_bot_service.send_text(room_id, text)
+                    text_result = await lark_bot_service.send_text(room_id, text)
+                    if not text_result.get("success"):
+                        logger.warning("Failed to send Lark progress text fallback: %s", text_result.get("error"))
                 return
 
             if not rocket_chat_service.is_configured:
@@ -291,6 +370,12 @@ class AgentOrchestrator:
                 result = state.get("result", {})
                 doc_info = result.get("document") or result.get("doc") or {}
                 slides_info = result.get("slides") or result.get("deck") or {}
+                lark_doc_id = None
+                if isinstance(doc_info, dict):
+                    # 只有真实飞书文档才允许展示“已在飞书中编辑”按钮，避免本地 doc_id 被误当成飞书 doc_id。
+                    lark_doc_id = doc_info.get("lark_doc_id")
+                    if not lark_doc_id and doc_info.get("provider") == "lark_docx":
+                        lark_doc_id = doc_info.get("doc_id")
 
                 card = build_delivery_card(
                     task_id=state["task_id"],
@@ -299,7 +384,7 @@ class AgentOrchestrator:
                     slides_title=slides_info.get("title") if isinstance(slides_info, dict) else None,
                     slides_count=slides_info.get("slides_count", 0) if isinstance(slides_info, dict) else 0,
                     chat_id=room_id,
-                    lark_doc_id=doc_info.get("doc_id") if isinstance(doc_info, dict) else None,
+                    lark_doc_id=lark_doc_id,
                 )
                 card_result = await lark_bot_service.send_card(room_id, card)
                 if not card_result.get("success"):
@@ -409,6 +494,8 @@ class AgentOrchestrator:
         ws_sender: Callable = None,
     ) -> AgentState:
         logger.info("Handling feedback for task %s: %s", task_id, feedback)
+        # 兼容早期或异常任务记录，避免反馈修改时把空结果当作字典读取。
+        base_result = base_result or {}
 
         state = create_initial_state(
             session_id=session_id,
@@ -441,6 +528,9 @@ class AgentOrchestrator:
 
             base_doc = base_result.get("document") or base_result.get("doc") or {}
             base_slides = base_result.get("slides") or base_result.get("deck") or {}
+            # 旧版本结果里这些字段可能为空或不是字典，统一归一化后再走局部修订。
+            base_doc = base_doc if isinstance(base_doc, dict) else {}
+            base_slides = base_slides if isinstance(base_slides, dict) else {}
             should_update_doc = self._should_update_doc(feedback, base_doc, base_slides)
             should_update_slides = self._should_update_slides(feedback, base_doc, base_slides)
             wants_rehearsal = self._wants_rehearsal(feedback)
@@ -484,11 +574,13 @@ class AgentOrchestrator:
                 await publish("generate_slides", 0.75, "Regenerating presentation with feedback")
                 slides = base_slides.get("slides") or []
                 target_indexes = self._extract_slide_indexes(feedback, len(slides))
-                title = base_slides.get("title") or state.get("doc_content", {}).get("title") or f"Task {task_id} deck"
+                title = base_slides.get("title") or (state.get("doc_content") or {}).get("title") or f"Task {task_id} deck"
                 doc_content = (state.get("doc_content") or {}).get("content", "")
                 metadata = dict(base_slides.get("metadata") or {})
 
                 if should_update_slides:
+                    if not slides:
+                        raise RuntimeError("未找到上一版 PPT 页面内容，无法执行局部修改。请重新生成 PPT 后再修改。")
                     if target_indexes:
                         revision = await revise_targeted_slides(
                             title=title,
@@ -498,17 +590,20 @@ class AgentOrchestrator:
                             audience=base_slides.get("audience") or "management",
                             doc_content=doc_content,
                         )
-                        if revision.get("global_change"):
-                            revised_spec = await revise_deck_spec(
-                                title=title,
-                                original_slides=slides,
-                                feedback=feedback,
-                                audience=base_slides.get("audience") or "management",
-                                doc_content=doc_content,
+                        if revision.get("global_change") or not revision.get("revised_slides"):
+                            # 用户已经明确指定页码时，不能让模型把局部反馈升级成整套重写。
+                            logger.warning(
+                                "Targeted slide revision requested global/empty change for task %s; forcing local patch",
+                                task_id,
                             )
-                        else:
-                            revised_slides = self._merge_revised_slides(slides, revision)
-                            revised_spec = self._build_deck_spec(title, base_slides, revised_slides, metadata)
+                            revision = {
+                                "target_slide_indexes": target_indexes,
+                                "global_change": False,
+                                "summary": "Applied feedback locally to target slides.",
+                                "revised_slides": self._fallback_targeted_slides(slides, target_indexes, feedback),
+                            }
+                        revised_slides = self._merge_revised_slides(slides, revision)
+                        revised_spec = self._build_deck_spec(title, base_slides, revised_slides, metadata)
                     else:
                         revised_spec = await revise_deck_spec(
                             title=title,
@@ -518,6 +613,11 @@ class AgentOrchestrator:
                             doc_content=doc_content,
                         )
                         target_indexes = list(range(len(slides)))
+
+                    if not revised_spec.get("slides") and slides:
+                        # 模型偶尔会返回自然语言拒绝或空 JSON，不能让空页面覆盖上一版 PPT。
+                        logger.warning("Deck revision returned empty slides for task %s; keeping previous slides", task_id)
+                        revised_spec = self._build_deck_spec(title, base_slides, slides, metadata)
 
                     metadata = self._updated_slide_metadata(
                         previous=metadata,
@@ -544,8 +644,14 @@ class AgentOrchestrator:
                     revised_spec = self._build_deck_spec(title, base_slides, slides, metadata)
                     file_path = base_slides.get("file_path")
 
-                rehearsal = await generate_rehearsal(revised_spec)
-                qa = await generate_qa(revised_spec, rehearsal)
+                if wants_rehearsal:
+                    rehearsal = await generate_rehearsal(revised_spec)
+                    qa = await generate_qa(revised_spec, rehearsal)
+                    qa_items = qa.get("items", [])
+                else:
+                    # 普通单页内容微调不重算演练稿和 Q&A，避免一次小改触发多轮 LLM。
+                    rehearsal = base_slides.get("rehearsal")
+                    qa_items = base_slides.get("qa", [])
                 state["slides_content"] = {
                     "slide_id": result.get("slide_id") if should_update_slides else base_slides.get("slide_id"),
                     "title": revised_spec.get("title"),
@@ -556,7 +662,7 @@ class AgentOrchestrator:
                     "duration_minutes": revised_spec.get("duration_minutes"),
                     "metadata": revised_spec.get("metadata", {}),
                     "rehearsal": rehearsal,
-                    "qa": qa.get("items", []),
+                    "qa": qa_items,
                     "feedback_history": revised_spec.get("metadata", {}).get("feedback_history", base_slides.get("feedback_history", [])),
                 }
             elif isinstance(base_slides, dict) and base_slides:
@@ -574,8 +680,10 @@ class AgentOrchestrator:
                     "feedback_history": base_slides.get("feedback_history", []),
                 }
 
-            if base_result.get("canvas"):
-                state["canvas_content"] = {"canvas_id": base_result["canvas"].get("canvas_id")}
+            canvas_result = base_result.get("canvas")
+            if isinstance(canvas_result, dict):
+                # 画布不是本次反馈的目标时，只保留原画布引用。
+                state["canvas_content"] = {"canvas_id": canvas_result.get("canvas_id")}
 
             state = await nodes.deliver_result(state)
             state["updated_at"] = datetime.utcnow().isoformat()
@@ -697,6 +805,29 @@ class AgentOrchestrator:
             if 0 <= index < len(merged):
                 merged[index] = {**merged[index], **dict(revised), "index": index}
         return merged
+
+    @staticmethod
+    def _fallback_targeted_slides(
+        original_slides: List[Dict[str, Any]],
+        target_indexes: List[int],
+        feedback: str,
+    ) -> List[Dict[str, Any]]:
+        """当模型不稳定时，至少把反馈安全地落到目标页，不重写整套 PPT。"""
+        revised_slides: List[Dict[str, Any]] = []
+        for index in target_indexes:
+            if not 0 <= index < len(original_slides):
+                continue
+            slide = dict(original_slides[index])
+            slide["index"] = index
+            bullets = list(slide.get("bullets") or [])
+            if bullets:
+                bullets.append(f"补充说明：{feedback}")
+                slide["bullets"] = bullets
+            else:
+                content = str(slide.get("content") or "").strip()
+                slide["content"] = f"{content}\n\n补充说明：{feedback}".strip()
+            revised_slides.append(slide)
+        return revised_slides
 
     @staticmethod
     def _build_deck_spec(

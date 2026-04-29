@@ -21,6 +21,10 @@ FEISHU_ASR_ENGINE_TYPE=16k_auto
 
 # 卡片按钮回调地址，在飞书开放平台 Bot 配置中填写同一个公网地址。
 LARK_CARD_CALLBACK_URL=https://your-public-domain/api/im/lark/card/action
+
+# 可选：生成的飞书云文档要落到哪个文件夹。
+# 从 https://xxx.feishu.cn/drive/folder/<folder_token> 中复制 folder_token。
+LARK_DOC_FOLDER_TOKEN=fldxxxxxxxx
 ```
 
 ## 飞书开放平台
@@ -47,7 +51,9 @@ https://your-public-domain/api/im/lark/card/action
 https://your-public-domain/api/im/lark/doc/events
 ```
 
-本地开发时，飞书必须能访问你的后端地址，可以使用 ngrok、Cloudflare Tunnel 等工具暴露本地服务。
+本地开发时，飞书必须能访问你的后端地址，可以使用 ngrok、cpolar、Cloudflare Tunnel 等工具暴露本地服务。不要把 `127.0.0.1`、`localhost` 或局域网地址填到飞书开放平台里，因为飞书服务器访问不到你的本机。
+
+如果没有配置 `LARK_DOC_FOLDER_TOKEN`，后端仍能用应用身份创建云文档，但该文档可能不会出现在你的个人云文档首页；建议测试时先创建一个专用文件夹，并把文件夹 token 写入 `backend/.env`。
 
 ## 运行流程
 
@@ -57,7 +63,7 @@ https://your-public-domain/api/im/lark/doc/events
 4. Agent 生成文档和 PPT。
 5. 后端通过飞书 OpenAPI 把进度、交付卡片和 PPT 文件发回原聊天。
 6. 后端补充发送演练摘要和 Top Q&A，方便直接进入汇报准备。
-7. 用户可从交付卡片打开飞书云文档编辑，编辑完成后通过卡片按钮或文档事件回调同步状态。
+7. 用户可从交付卡片打开飞书云文档编辑，编辑完成后通过卡片按钮或文档事件回调同步远端内容、版本号和差异摘要。
 8. 用户继续发送“第 N 页...”这类修改意见时，后端会按原聊天校验权限并局部更新 PPT。
 
 当前暂未实现加密事件回调，飞书控制台中请先关闭事件加密。

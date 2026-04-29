@@ -27,8 +27,18 @@ export interface Document {
   created_at: string
   doc_url?: string | null
   lark_doc_id?: string | null
+  lark_doc_url?: string | null
   last_edited_by?: string | null
   last_edited_at?: string | null
+  diff_summary?: string | null
+  changed_lines?: number | null
+}
+
+export interface DocumentHistoryItem {
+  id: string
+  event_type: string
+  payload: Record<string, any>
+  created_at: string
 }
 
 export interface Slide {

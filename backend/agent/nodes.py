@@ -19,6 +19,7 @@ from backend.services.llm_service import (
     plan_workflow as llm_plan_workflow,
 )
 from backend.services.delivery_service import archive_task
+from backend.services.affine_service import affine_service
 from backend.tools.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
@@ -298,6 +299,9 @@ async def generate_doc(state: AgentState) -> AgentState:
                 "content": content,
                 "content_preview": content[:500] + "..." if len(content) > 500 else content,
                 "doc_url": result.get("doc_url"),
+                "lark_doc_id": result.get("doc_id") if result.get("provider") == "lark_docx" else None,
+                "lark_doc_url": result.get("doc_url"),
+                "version": 1,
             }
             state["doc_id"] = result.get("doc_id")
             _append_message(
@@ -329,6 +333,8 @@ async def generate_canvas(state: AgentState) -> AgentState:
             intent=state.get("intent", ""),
             doc_content=(state.get("doc_content") or {}).get("content", ""),
             steps=state.get("steps", []),
+            # 本地 mock 画布不需要 LLM 参与，避免 Demo 卡在 generate_canvas。
+            use_llm=affine_service.is_configured,
         )
         diagram_type = spec.get("diagram_type") or "flow"
         action = "create_architecture_diagram" if diagram_type == "architecture" else "create_flow_diagram"
@@ -482,6 +488,9 @@ async def deliver_result(state: AgentState) -> AgentState:
             "content": state["doc_content"].get("content"),
             "preview": state["doc_content"].get("content_preview"),
             "doc_url": state["doc_content"].get("doc_url"),
+            "lark_doc_id": state["doc_content"].get("lark_doc_id"),
+            "lark_doc_url": state["doc_content"].get("lark_doc_url"),
+            "version": state["doc_content"].get("version", 1),
         }
         delivery["document"] = doc_payload
         delivery["doc"] = doc_payload

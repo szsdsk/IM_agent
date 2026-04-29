@@ -22,12 +22,12 @@ Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它以 
 | LLM 接入 | 使用 LangChain `ChatOpenAI`，兼容 OpenAI-style API，可通过 `.env` 切换模型和 `base_url` |
 | 工具层 | DocTool、PPTTool、IMTool 已改造为 LangChain `StructuredTool` 调用形态 |
 | 文档生成 | 生成 Markdown 结构化文档；配置飞书后可创建飞书云文档并写入内容 |
-| 文档编辑回写 | 飞书交付卡片可打开云文档编辑，编辑完成后通过卡片按钮或文档事件回调同步本地状态 |
+| 文档编辑回写 | 飞书交付卡片可打开云文档编辑，编辑完成后通过卡片按钮或文档事件回调同步本地状态、远端内容和版本差异 |
 | PPT 生成与修改 | 生成 DeckSpec/页面数据，支持多主题、多布局和演示场景适配；可按“第 N 页...”进行局部反馈修改并重新导出 `.pptx` |
 | 演练与 Q&A | 生成每页演讲提示、预计时长和可能 Q&A，网页端展示并通过飞书 Bot 发送摘要 |
 | 白板/画布 | 接入 CanvasTool + AFFiNE service；未配置 AFFiNE 时使用本地 mock 画布预览 |
 | 语音识别 | 前端录音转 PCM16k，后端调用飞书 ASR；飞书 Bot 语音消息也可转写后触发 Agent |
-| 飞书交付 | 基于飞书 OpenAPI 发送进度卡片、交付卡片、文本消息和 PPT 文件 |
+| 飞书交付 | 基于飞书 OpenAPI 发送进度卡片、交付卡片、文本消息和 PPT 文件；交付卡片点击确认、修改或编辑完成后会替换为只读状态卡，避免重复误操作 |
 | 网页工作台 | 响应式工作台：输入与场景选择、流程进度、文档/PPT/画布预览 |
 | 状态同步 | WebSocket 推送任务进度，SyncService 提供内存/Redis 两种同步通道；前端支持本地状态恢复和离线消息暂存 |
 | 数据存储 | 默认 SQLite，任务、文档、PPT 等结果落库 |
@@ -40,7 +40,7 @@ Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它以 
 | --- | --- | --- |
 | IM 作为 Agent 入口，支持文本/语音 | 已完成 | 网页端和飞书 Bot 均可发起任务；飞书 Bot 支持文本和语音消息 |
 | Agent 任务理解与规划 | 已完成 | LangGraph 工作流 + LangChain 模型层，支持意图解析、流程规划和任务抽取 |
-| 文档生成与编辑 | 已完成 | 可生成本地文档预览；配置飞书后可创建云文档、写入内容，并支持编辑状态回写 |
+| 文档生成与编辑 | 已完成 | 可生成本地文档预览；配置飞书后可创建云文档、写入内容、落到指定文件夹，并支持编辑内容回写和版本差异 |
 | PPT/演示稿生成与导出 | 已完成 | 可生成 PPT 结构、前端预览并下载 `.pptx`；飞书 Bot 可回传 PPT 文件 |
 | PPT 演练与修改闭环 | 已完成 | 支持页码自然语言反馈、局部更新、重新导出 PPT、演练稿和 Q&A 展示 |
 | 总结与交付 | 已完成 | 网页端下载交付，飞书端通过交付卡片和文件消息完成交付 |
@@ -156,6 +156,7 @@ node index.js
 | `LARK_BOT_REQUIRE_MENTION` | 群聊中是否要求 @Bot 才处理消息 |
 | `LARK_VERIFICATION_TOKEN` | 飞书事件订阅校验 token |
 | `LARK_DEFAULT_CHAT_ID` | 可选默认群 ID |
+| `LARK_DOC_FOLDER_TOKEN` | 可选飞书云文档目标文件夹 token；不配置时文档可能只在应用默认位置可访问 |
 | `LARK_CARD_CALLBACK_URL` | 飞书卡片请求地址 |
 | `AFFINE_URL` | 可选 AFFiNE 服务地址，不配置时使用本地 mock 画布 |
 | `AFFINE_TOKEN` | 可选 AFFiNE API Token |
@@ -172,6 +173,8 @@ node index.js
 - 将事件订阅地址配置为 `https://your-domain.com/api/im/lark/events`。
 - 将卡片回调地址配置为 `https://your-domain.com/api/im/lark/card/action`。
 - 如果要接收云文档编辑事件，可配置文档事件回调到 `https://your-domain.com/api/im/lark/doc/events`。
+- 本地测试不能直接使用 `127.0.0.1` 作为飞书回调地址，需要用 ngrok、cpolar、Cloudflare Tunnel 等工具暴露公网 HTTPS 地址。
+- 如需让生成的云文档出现在指定文件夹，请把飞书文件夹 URL 中 `/drive/folder/` 后面的 token 配置到 `LARK_DOC_FOLDER_TOKEN`。
 
 本地开发时，飞书必须能访问后端公网地址，可以使用 ngrok、Cloudflare Tunnel 等工具暴露本地服务。
 
@@ -188,6 +191,7 @@ node index.js
 | `GET` | `/api/tasks/{id}` | 查询任务状态 |
 | `POST` | `/api/tasks/{id}/confirm` | 确认或修改任务 |
 | `GET` | `/api/documents/{id}` | 获取生成文档 |
+| `GET` | `/api/documents/{id}/history` | 获取飞书文档编辑版本历史 |
 | `GET` | `/api/slides/{id}` | 获取生成 PPT 数据 |
 | `GET` | `/api/files/slides/{filename}` | 下载本地 PPT 文件 |
 | `POST` | `/api/im/lark/events` | 飞书事件订阅回调 |
@@ -229,9 +233,9 @@ node index.js
 - [x] 飞书 Bot 文本/语音消息入口
 - [x] 飞书 ASR 语音转写
 - [x] 飞书 OpenAPI 文本消息、卡片消息、文件上传和文件发送
-- [x] 飞书云文档创建、内容写入和网页端编辑跳转
-- [x] 飞书文档编辑后状态回写
-- [x] 飞书交付卡片确认/修改入口
+- [x] 飞书云文档创建、指定文件夹落盘、内容写入和网页端编辑跳转
+- [x] 飞书文档编辑后远端内容回写、版本更新和差异摘要展示
+- [x] 飞书交付卡片确认/修改/编辑完成入口稳定响应，并在点击后替换为只读状态卡
 - [x] WebSocket 任务进度推送和 SyncService 基础同步能力
 - [x] PPT 逐页反馈修改、演练稿和 Q&A 训练材料
 - [x] AFFiNE CanvasTool 和网页端画布预览
@@ -243,7 +247,6 @@ node index.js
 
 - [ ] AFFiNE 真实协同编辑体验、画布高级布局和导出
 - [ ] 更完整的多端协同：跨端编辑一致性、复杂离线编辑和冲突合并
-- [ ] 飞书文档内容级增量同步和版本差异展示
 - [ ] 权限、审批、团队协作治理和交付归档策略
 - [ ] 更完整的自动化测试、部署文档和演示脚本
 

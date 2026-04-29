@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import text
 from typing import AsyncGenerator
 
 from backend.config import settings
@@ -37,3 +38,25 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _run_sqlite_schema_patches(conn)
+
+
+async def _run_sqlite_schema_patches(conn) -> None:
+    """为本地旧 SQLite 数据库补齐后续版本新增的列。"""
+    if not settings.DATABASE_URL.startswith("sqlite"):
+        return
+
+    documents_columns = {
+        row[1]
+        for row in (await conn.exec_driver_sql("PRAGMA table_info(documents)")).fetchall()
+    }
+    missing_document_columns = {
+        "lark_doc_id": "VARCHAR(100)",
+        "lark_doc_url": "VARCHAR(500)",
+        "last_edited_by": "VARCHAR(100)",
+        "last_edited_at": "DATETIME",
+    }
+
+    for column_name, column_type in missing_document_columns.items():
+        if column_name not in documents_columns:
+            await conn.execute(text(f"ALTER TABLE documents ADD COLUMN {column_name} {column_type}"))

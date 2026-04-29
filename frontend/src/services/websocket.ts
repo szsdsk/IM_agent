@@ -125,9 +125,13 @@ class WebSocketService {
             id: resultDoc.doc_id || data.task_id || `doc-${Date.now()}`,
             task_id: data.task_id || '',
             content: resultDoc.content || resultDoc.preview || '',
-            version: 1,
+            version: resultDoc.version || 1,
             created_at: data.timestamp,
-            doc_url: resultDoc.doc_url || null,
+            doc_url: resultDoc.doc_url || resultDoc.lark_doc_url || null,
+            lark_doc_url: resultDoc.lark_doc_url || resultDoc.doc_url || null,
+            lark_doc_id: resultDoc.lark_doc_id || null,
+            last_edited_by: resultDoc.last_edited_by || null,
+            last_edited_at: resultDoc.last_edited_at || null,
           } as any)
         }
         if (resultSlides) {
@@ -206,20 +210,26 @@ class WebSocketService {
           const changes = data.data.changes || {}
           const docId = data.data.doc_id
           const currentDoc = store.doc
-          if (currentDoc && currentDoc.id === docId) {
+          if (currentDoc && (currentDoc.id === docId || currentDoc.lark_doc_id === docId || currentDoc.lark_doc_id === changes.lark_doc_id)) {
             store.setDoc({
               ...currentDoc,
+              content: changes.content ?? currentDoc.content,
+              lark_doc_id: changes.lark_doc_id || currentDoc.lark_doc_id,
+              lark_doc_url: changes.lark_doc_url || currentDoc.lark_doc_url,
               last_edited_by: changes.last_edited_by || currentDoc.last_edited_by,
               last_edited_at: changes.last_edited_at || currentDoc.last_edited_at,
               version: changes.version || currentDoc.version,
+              diff_summary: changes.diff_summary || currentDoc.diff_summary,
+              changed_lines: changes.changed_lines ?? currentDoc.changed_lines,
             } as any)
           }
           // Notify user
           const editor = changes.last_edited_by ? ` by ${changes.last_edited_by}` : ''
+          const changed = changes.changed_lines !== undefined ? `，变更 ${changes.changed_lines} 行` : ''
           store.addMessage({
             id: `msg-${Date.now()}`,
             role: 'system',
-            content: `文档已在飞书中编辑${editor}，版本已更新至 v${changes.version || '?'}`,
+            content: `文档已在飞书中编辑${editor}，版本已更新至 v${changes.version || '?'}${changed}`,
             timestamp: data.timestamp,
           })
         }

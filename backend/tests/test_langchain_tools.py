@@ -1,5 +1,6 @@
 import unittest
 
+from backend.services.lark_bot_service import build_progress_card, markdown_to_lark_blocks
 from backend.tools.doc_tool import DocTool
 from backend.tools.canvas_tool import CanvasTool
 from backend.tools.ppt_tool import PPTTool
@@ -67,6 +68,23 @@ class LangChainToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["provider"], "local_mock")
         self.assertEqual(result["diagram_type"], "flow")
+
+    async def test_markdown_to_lark_blocks_uses_supported_block_types(self):
+        # 飞书 Docx OpenAPI 不支持 block_type=16；列表和引用块要使用当前可写入的类型。
+        blocks = markdown_to_lark_blocks("- 要点\n> 引用\n---")
+
+        self.assertEqual(blocks[0]["block_type"], 12)
+        self.assertEqual(blocks[1]["block_type"], 15)
+        self.assertEqual(blocks[2], {"block_type": 22, "divider": {}})
+
+    async def test_lark_progress_card_uses_safe_components(self):
+        # 进度卡片只使用飞书交互卡片的基础组件，避免 progress_bar 在部分租户中校验失败。
+        card = build_progress_card("task_1", "generate_slides", 0.75)
+
+        tags = [element.get("tag") for element in card["elements"]]
+        self.assertIn("div", tags)
+        self.assertNotIn("progress_bar", tags)
+        self.assertIn("75%", card["elements"][0]["text"]["content"])
 
 
 if __name__ == "__main__":

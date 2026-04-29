@@ -4,6 +4,7 @@ import mimetypes
 import re
 import time
 import uuid
+import asyncio
 from base64 import b64encode
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -125,7 +126,13 @@ class LarkBotService:
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            return {
+                "success": False,
+                "provider": "lark_openapi",
+                "error": self._redact(response.text),
+                "status_code": response.status_code,
+            }
         data = response.json()
         return {
             "success": data.get("code") == 0,
@@ -340,7 +347,13 @@ class LarkBotService:
                 "content": json.dumps(card, ensure_ascii=False),
             },
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            return {
+                "success": False,
+                "provider": "lark_openapi",
+                "error": self._redact(response.text),
+                "status_code": response.status_code,
+            }
         data = response.json()
         return {
             "success": data.get("code") == 0,
@@ -358,7 +371,12 @@ class LarkBotService:
         return token == self.verification_token or header.get("token") == self.verification_token
 
     def is_url_verification(self, payload: Dict[str, Any]) -> bool:
-        return payload.get("type") == "url_verification" and bool(payload.get("challenge"))
+        # 事件订阅和部分回调配置的 URL 校验 payload 形态不完全一致，
+        # 只要带 challenge 且没有业务事件体，就按 URL 校验处理。
+        if not payload.get("challenge"):
+            return False
+        payload_type = payload.get("type")
+        return payload_type in {None, "url_verification"}
 
     def extract_message_event(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         event = payload.get("event") if isinstance(payload.get("event"), dict) else None
@@ -407,7 +425,7 @@ class LarkBotService:
 
         Returns doc info dict with keys: doc_id, user_id, revision_id, task_id (if from card).
         """
-        # Case 1: Card callback with embedded doc info (highest priority)
+        # 场景 1：卡片回调直接携带文档信息，优先使用。
         action = payload.get("action", {}) if isinstance(payload, dict) else {}
         value = action.get("value", {}) if isinstance(action, dict) else {}
         card_doc_id = value.get("lark_doc_id") or value.get("doc_id")
@@ -422,7 +440,7 @@ class LarkBotService:
                 "source": "card_callback",
             }
 
-        # Case 2: Event subscription (docx.document.editable_version_updated)
+        # 场景 2：飞书文档事件订阅。
         event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
         doc_info = event.get("doc", {}) if isinstance(event, dict) else {}
         doc_id = doc_info.get("document_id")
@@ -543,14 +561,24 @@ class LarkBotService:
             headers={"Authorization": f"Bearer {token}"},
             json=payload,
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            return {
+                "success": False,
+                "document_id": None,
+                "title": title,
+                "url": "",
+                "revision_id": None,
+                "error": self._redact(response.text),
+                "status_code": response.status_code,
+            }
         data = response.json()
         doc = (data.get("data") or {}).get("document", {})
         return {
             "success": data.get("code") == 0,
             "document_id": doc.get("document_id"),
             "title": doc.get("title", title),
-            "url": (data.get("data") or {}).get("url", ""),
+            # 不同飞书响应版本可能把访问链接放在 data.url 或 data.document.url。
+            "url": (data.get("data") or {}).get("url") or doc.get("url", ""),
             "revision_id": (data.get("data") or {}).get("revision_id"),
             "error": None if data.get("code") == 0 else data.get("msg"),
         }
@@ -560,6 +588,7 @@ class LarkBotService:
         document_id: str,
         block_id: str,
         blocks: List[Dict[str, Any]],
+        index: int = 0,
     ) -> Dict[str, Any]:
         """向飞书文档追加 block 内容。block_id 为页面根节点时用 document_id。"""
         if not self.is_configured:
@@ -569,14 +598,27 @@ class LarkBotService:
         if not token:
             return {"success": False, "error": "Failed to get tenant access token."}
 
-        payload = {"children": blocks}
+        # 飞书创建块接口对 index 校验比较严格，使用明确的非负插入位置比 -1 追加更稳定。
+        insert_index = max(index, 0)
+        payload = {"index": insert_index, "children": blocks}
 
         response = await self.client.post(
             f"/docx/v1/documents/{document_id}/blocks/{block_id}/children",
+            params={"document_revision_id": -1, "client_token": str(uuid.uuid4())},
             headers={"Authorization": f"Bearer {token}"},
             json=payload,
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            error_text = self._redact(response.text)
+            block_types = [block.get("block_type") for block in blocks]
+            return {
+                "success": False,
+                "children": [],
+                "error": (
+                    f"Feishu Docx create block failed: HTTP {response.status_code}; "
+                    f"index={insert_index}; block_types={block_types}; body={error_text}"
+                ),
+            }
         data = response.json()
         return {
             "success": data.get("code") == 0,
@@ -594,11 +636,28 @@ class LarkBotService:
         if not blocks:
             return {"success": True, "document_id": document_id, "blocks_written": 0}
 
-        result = await self.create_doc_block(document_id, document_id, blocks)
+        written = 0
+        created_children = []
+        for index in range(0, len(blocks), 50):
+            batch = blocks[index:index + 50]
+            result = await self.create_doc_block(document_id, document_id, batch, index=written)
+            if not result.get("success"):
+                return {
+                    **result,
+                    "document_id": document_id,
+                    "blocks_written": written,
+                }
+            written += len(batch)
+            created_children.extend(result.get("children") or [])
+            if index + 50 < len(blocks):
+                await asyncio.sleep(0.4)
+
         return {
-            **result,
+            "success": True,
             "document_id": document_id,
-            "blocks_written": len(blocks) if result.get("success") else 0,
+            "children": created_children,
+            "blocks_written": written,
+            "error": None,
         }
 
     async def get_doc_raw_content(self, document_id: str) -> Dict[str, Any]:
@@ -659,16 +718,16 @@ def markdown_to_lark_blocks(markdown: str) -> List[Dict[str, Any]]:
             })
         elif stripped.startswith("- ") or stripped.startswith("* "):
             blocks.append({
-                "block_type": 16,  # bullet
+                "block_type": 12,  # bullet
                 "bullet": {"elements": [_text_element(stripped[2:])]},
             })
         elif stripped.startswith("> "):
             blocks.append({
-                "block_type": 18,  # quote
+                "block_type": 15,  # quote
                 "quote": {"elements": [_text_element(stripped[2:])]},
             })
         elif stripped == "---":
-            blocks.append({"block_type": 22})  # divider
+            blocks.append({"block_type": 22, "divider": {}})  # divider
         else:
             # Remove leading number prefix like "1. "
             content = stripped
@@ -706,11 +765,11 @@ def build_progress_card(task_id: str, step: str, progress: float) -> Dict[str, A
         "elements": [
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**当前步骤**: {step_name}\n**任务 ID**: `{task_id}`"},
-            },
-            {
-                "tag": "progress_bar",
-                "progress_bar": {"percentage": pct, "indicator": True},
+                # 进度卡片用最基础的 Markdown 文本，避免不同飞书卡片版本对高级组件校验不一致。
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**当前步骤**: {step_name}\n**进度**: {pct}%\n**任务 ID**: `{task_id}`",
+                },
             },
         ],
     }
@@ -747,7 +806,7 @@ def build_delivery_card(
 
     elements.append({"tag": "hr"})
 
-    # Interactive buttons
+    # 交付卡片的交互按钮，点击后统一回到后端卡片回调接口。
     action_value: Dict[str, str] = {"task_id": task_id}
     if chat_id:
         action_value["chat_id"] = chat_id
@@ -767,7 +826,7 @@ def build_delivery_card(
         },
     ]
 
-    # If Feishu doc exists, add "edit done" button to trigger writeback
+    # 只有成功创建飞书文档时，才展示“已在飞书中编辑”按钮触发回写。
     if lark_doc_id:
         actions.append({
             "tag": "button",
@@ -782,10 +841,62 @@ def build_delivery_card(
     })
 
     return {
-        "config": {"wide_screen_mode": True},
+        # 交互结果要替换同一张共享卡片，因此交付卡片显式开启多人可更新。
+        "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": "Agent-Pilot 任务完成"},
             "template": "green",
+        },
+        "elements": elements,
+    }
+
+
+def build_delivery_status_card(
+    task_id: str,
+    status_text: str,
+    detail: str = None,
+    template: str = "green",
+    doc_title: str = None,
+    doc_url: str = None,
+    slides_title: str = None,
+    slides_count: int = 0,
+) -> Dict[str, Any]:
+    """构建按钮点击后的只读状态卡片，用于替换旧的交付卡片。"""
+    elements: List[Dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**任务 ID**: `{task_id}`"},
+        },
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**当前状态**: {status_text}"},
+        },
+    ]
+
+    if detail:
+        elements.append({
+            "tag": "note",
+            "elements": [{"tag": "plain_text", "content": detail}],
+        })
+
+    if doc_title:
+        doc_line = f"📄 **文档**: {doc_title}"
+        if doc_url:
+            doc_line += f"  [在飞书中打开]({doc_url})"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": doc_line}})
+
+    if slides_title:
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📊 **PPT**: {slides_title} ({slides_count} 页)"},
+        })
+
+    return {
+        # 状态卡也保持共享可更新，避免群聊里不同成员看到不一致的按钮状态。
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"Agent-Pilot {status_text}"},
+            "template": template,
         },
         "elements": elements,
     }

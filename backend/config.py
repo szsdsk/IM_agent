@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     LARK_BOT_ENABLED: bool = True
     LARK_BOT_REQUIRE_MENTION: bool = True
     LARK_DEFAULT_CHAT_ID: Optional[str] = None
+    LARK_DOC_FOLDER_TOKEN: Optional[str] = None
 
     HOST: str = "0.0.0.0"
     PORT: int = 8000

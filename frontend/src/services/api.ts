@@ -1,4 +1,4 @@
-import type { Session, Task, Document, Slide, Message, Health, PresentationScene } from '../types'
+import type { Session, Task, Document, DocumentHistoryItem, Slide, Message, Health, PresentationScene } from '../types'
 
 const API_BASE = '/api'
 
@@ -64,6 +64,10 @@ export const api = {
 
   async getDocument(documentId: string): Promise<Document> {
     return fetchAPI<Document>(`/documents/${documentId}`)
+  },
+
+  async getDocumentHistory(documentId: string): Promise<DocumentHistoryItem[]> {
+    return fetchAPI<DocumentHistoryItem[]>(`/documents/${documentId}/history`)
   },
 
   async getSlides(slideId: string): Promise<Slide> {

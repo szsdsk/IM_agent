@@ -64,6 +64,10 @@ class DocumentResponse(BaseModel):
     task_id: str
     content: Optional[str]
     version: int
+    lark_doc_id: Optional[str] = None
+    lark_doc_url: Optional[str] = None
+    last_edited_by: Optional[str] = None
+    last_edited_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:

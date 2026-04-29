@@ -36,7 +36,7 @@ function getDownloadHref(filePath: string): string {
 }
 
 export default function SlideViewer({ className = '' }: SlideViewerProps) {
-  const { slides } = useSessionStore()
+  const { slides, status } = useSessionStore()
   const [selectedIndex, setSelectedIndex] = useState(0)
 
   if (!slides) {
@@ -162,7 +162,10 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
             )}
           </div>
         ) : (
-          <div className="text-center text-gray-400 py-12">PPT 正在生成中...</div>
+          <div className="text-center text-gray-400 py-12">
+            {/* 任务完成但页面为空时，多半是后端没有拿到上一版 slides，避免误导成仍在生成。 */}
+            {status === 'completed' ? '未获取到 PPT 页面内容，请重新生成或刷新后重试。' : 'PPT 正在生成中...'}
+          </div>
         )}
       </div>
     </div>

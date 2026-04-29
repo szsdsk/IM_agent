@@ -11,6 +11,8 @@ const stepNames: Record<string, { name: string; icon: string }> = {
   plan_workflow: { name: '规划流程', icon: 'PL' },
   extract_tasks: { name: '提取任务', icon: 'TK' },
   generate_doc: { name: '生成文档', icon: 'DOC' },
+  // 与后端 LangGraph 节点保持一致，避免生成画布时状态卡片空白。
+  generate_canvas: { name: '生成画布', icon: 'MAP' },
   generate_slides: { name: '生成 PPT', icon: 'PPT' },
   confirm_or_modify: { name: '等待确认', icon: 'OK' },
   deliver_result: { name: '交付结果', icon: 'END' },

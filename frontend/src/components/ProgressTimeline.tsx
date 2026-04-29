@@ -11,9 +11,11 @@ const steps = [
   { key: 'plan_workflow', name: '规划流程', icon: '3' },
   { key: 'extract_tasks', name: '提取任务', icon: '4' },
   { key: 'generate_doc', name: '生成文档', icon: '5' },
-  { key: 'generate_slides', name: '生成 PPT', icon: '6' },
-  { key: 'confirm_or_modify', name: '确认修改', icon: '7' },
-  { key: 'deliver_result', name: '交付结果', icon: '8' },
+  // 后端会在需要结构图时推送 generate_canvas，前端要把它纳入时间线。
+  { key: 'generate_canvas', name: '生成画布', icon: '6' },
+  { key: 'generate_slides', name: '生成 PPT', icon: '7' },
+  { key: 'confirm_or_modify', name: '确认修改', icon: '8' },
+  { key: 'deliver_result', name: '交付结果', icon: '9' },
 ]
 
 type StepStatus = 'completed' | 'active' | 'pending' | 'failed'

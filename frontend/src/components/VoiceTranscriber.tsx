@@ -23,7 +23,9 @@ interface PendingMessage {
 
 function isFeedbackLike(content: string): boolean {
   const text = content.toLowerCase()
-  return [
+  if (isNewGenerationRequest(text)) return false
+
+  return hasSlideReference(text) || [
     '改',
     '修改',
     '调整',
@@ -32,10 +34,10 @@ function isFeedbackLike(content: string): boolean {
     '删除',
     '增加',
     '补充',
-    '第',
-    '页',
-    'slide',
-    'ppt',
+    '更详细',
+    '丰富',
+    '具体一点',
+    '换成',
     '排练',
     '演练',
     '讲稿',
@@ -43,6 +45,26 @@ function isFeedbackLike(content: string): boolean {
     'qa',
     '问答',
   ].some((marker) => text.includes(marker))
+}
+
+function hasSlideReference(content: string): boolean {
+  return (
+    /第\s*[0-9一二两三四五六七八九十百]+\s*[页張张]/i.test(content) ||
+    /(?:slide|page|p)\s*#?\s*[0-9]+/i.test(content)
+  )
+}
+
+function isNewGenerationRequest(content: string): boolean {
+  const text = content.toLowerCase()
+  const createMarkers = ['生成', '创建', '制作', '做一个', '做一份', '新建', '写一个', '来一个', 'create', 'generate', 'make']
+  const artifactMarkers = ['ppt', '演示', '幻灯片', 'deck', 'slides', '文档', '报告', '画布', '流程图']
+  const revisionMarkers = ['修改', '调整', '优化', '替换', '删掉', '删除', '补充', '改成', '更详细', '丰富', '具体一点']
+  return (
+    createMarkers.some((marker) => text.includes(marker)) &&
+    artifactMarkers.some((marker) => text.includes(marker)) &&
+    !hasSlideReference(text) &&
+    !revisionMarkers.some((marker) => text.includes(marker))
+  )
 }
 
 function loadPendingMessages(): PendingMessage[] {
@@ -114,7 +136,21 @@ export default function VoiceTranscriber() {
   const streamRef = useRef<MediaStream | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
-  const { messages, sessionId, task, status, setSessionId, setTask, addMessage } = useSessionStore()
+  const {
+    messages,
+    sessionId,
+    task,
+    status,
+    setSessionId,
+    setTask,
+    setStatus,
+    setCurrentStep,
+    setProgress,
+    setDoc,
+    setSlides,
+    setCanvas,
+    addMessage,
+  } = useSessionStore()
 
   const stopTracks = () => {
     recorderRef.current?.stream.getTracks().forEach((t) => t.stop())
@@ -140,6 +176,20 @@ export default function VoiceTranscriber() {
     setDraft('')
     try {
       const feedbackTaskId = task?.id && isFeedbackLike(content) ? task.id : undefined
+      if (feedbackTaskId) {
+        setStatus('running')
+        setCurrentStep('confirm_or_modify')
+        setProgress(0.1)
+      } else {
+        // 新任务需要清空上一轮产物和进度，避免看起来像从旧流程中途继续。
+        setTask(null)
+        setDoc(null)
+        setSlides(null)
+        setCanvas(null)
+        setStatus('running')
+        setCurrentStep('receive_input')
+        setProgress(0)
+      }
       addMessage({
         id: `user-${Date.now()}`,
         role: 'user',

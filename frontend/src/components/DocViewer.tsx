@@ -19,15 +19,19 @@ export default function DocViewer({ className = '' }: DocViewerProps) {
     )
   }
 
-  // Check for Feishu doc URL
-  const feishuUrl = (doc as any)?.doc_url as string | undefined
+  const feishuUrl = doc.lark_doc_url || doc.doc_url || undefined
+  const editedAt = doc.last_edited_at ? new Date(doc.last_edited_at).toLocaleString() : null
 
   return (
     <div className={`bg-white border rounded-lg shadow-sm overflow-hidden ${className}`}>
       <div className="px-4 py-3 border-b bg-gray-50 flex justify-between items-center">
         <div>
           <h3 className="font-medium text-gray-800">文档预览</h3>
-          <p className="text-xs text-gray-500 mt-1">版本: {doc.version}</p>
+          <div className="text-xs text-gray-500 mt-1 space-y-1">
+            <p>版本: {doc.version}</p>
+            {doc.last_edited_by && <p>最后编辑: {doc.last_edited_by}{editedAt ? ` · ${editedAt}` : ''}</p>}
+            {doc.lark_doc_id && <p>飞书文档 ID: {doc.lark_doc_id}</p>}
+          </div>
         </div>
         {feishuUrl && (
           <a
@@ -40,6 +44,15 @@ export default function DocViewer({ className = '' }: DocViewerProps) {
           </a>
         )}
       </div>
+
+      {doc.diff_summary && (
+        <div className="mx-6 mt-4 rounded-md border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
+          <div className="font-medium mb-1">
+            最近一次飞书编辑同步{doc.changed_lines !== undefined && doc.changed_lines !== null ? ` · 变更 ${doc.changed_lines} 行` : ''}
+          </div>
+          <pre className="whitespace-pre-wrap break-words text-xs leading-relaxed">{doc.diff_summary}</pre>
+        </div>
+      )}
 
       <div className="p-6 overflow-y-auto max-h-[600px] prose prose-sm max-w-none">
         {doc.content ? (

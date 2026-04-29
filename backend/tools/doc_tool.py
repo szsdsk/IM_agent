@@ -102,7 +102,11 @@ class DocTool(BaseTool):
 
         if lark_bot_service.is_configured:
             try:
-                doc_result = await lark_bot_service.create_doc(title=title or "未命名文档")
+                # 指定文件夹后，飞书文档会出现在用户可见的云文档目录中；未配置时仍走飞书默认位置。
+                doc_result = await lark_bot_service.create_doc(
+                    title=title or "未命名文档",
+                    folder_token=settings.LARK_DOC_FOLDER_TOKEN,
+                )
                 if doc_result.get("success") and doc_result.get("document_id"):
                     doc_id = doc_result["document_id"]
                     doc_url = doc_result.get("url", "")
@@ -114,6 +118,10 @@ class DocTool(BaseTool):
                             doc_id, content
                         )
                         self._log("info", f"Wrote {write_result.get('blocks_written', 0)} blocks to Feishu doc")
+                        if not write_result.get("success"):
+                            self._log("warning", f"Feishu Docx write failed, using local document record: {write_result.get('error')}")
+                            doc_url = None
+                            provider = "local"
             except Exception as exc:
                 self._log("warning", f"Feishu Docx API failed, falling back: {str(exc)}")
 
