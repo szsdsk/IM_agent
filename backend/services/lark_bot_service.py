@@ -546,11 +546,16 @@ class LarkBotService:
         response.raise_for_status()
         data = response.json()
         doc = (data.get("data") or {}).get("document", {})
+        document_id = doc.get("document_id")
+        # 飞书 Docx API 不一定返回 url，需要自行拼接
+        doc_url = (data.get("data") or {}).get("url", "")
+        if not doc_url and document_id:
+            doc_url = f"https://bytedance.feishu.cn/docx/{document_id}"
         return {
             "success": data.get("code") == 0,
-            "document_id": doc.get("document_id"),
+            "document_id": document_id,
             "title": doc.get("title", title),
-            "url": (data.get("data") or {}).get("url", ""),
+            "url": doc_url,
             "revision_id": (data.get("data") or {}).get("revision_id"),
             "error": None if data.get("code") == 0 else data.get("msg"),
         }
