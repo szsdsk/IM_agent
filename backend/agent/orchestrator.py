@@ -15,7 +15,7 @@ from backend.services.lark_bot_service import (
     lark_bot_service,
 )
 from backend.services.llm_service import revise_deck_spec, revise_doc_content
-from backend.services.llm_service import generate_qa, generate_rehearsal, revise_targeted_slides
+from backend.services.llm_service import generate_qa, generate_rehearsal, revise_targeted_slides, summarize_im_context
 from backend.services.rocket_chat_service import (
     fetch_im_context,
     post_delivery_to_im,
@@ -35,7 +35,9 @@ STEP_PROGRESS = {
     "generate_doc": 0.5,
     "generate_canvas": 0.6,
     "generate_slides": 0.7,
-    "confirm_or_modify": 0.85,
+    "generate_rehearsal": 0.78,
+    "prepare_delivery": 0.83,
+    "confirm_or_modify": 0.88,
     "deliver_result": 1.0,
 }
 
@@ -184,26 +186,9 @@ class AgentOrchestrator:
 
         current_state: AgentState = state
         try:
-            async for event in self._workflow.astream(state, stream_mode="updates"):
-                for node_name, node_update in event.items():
-                    if node_name == END:
-                        continue
-                    if isinstance(node_update, dict):
-                        current_state = AgentState(**{**current_state, **node_update})
-                    await self._publish_progress(room_id, task_id, current_state, ws_sender)
-                    next_step = self._next_step_after(node_name, current_state)
-                    if next_step and not current_state.get("error") and current_state.get("status") != "completed":
-                        current_state = AgentState(
-                            **{
-                                **current_state,
-                                "current_step": next_step,
-                                "progress": STEP_PROGRESS.get(next_step, current_state.get("progress", 0)),
-                                "updated_at": datetime.utcnow().isoformat(),
-                            }
-                        )
-                        await self._publish_step_start(task_id, current_state, ws_sender)
+            current_state = await self._run_plan_and_execute(current_state, room_id, task_id, ws_sender)
         except Exception as exc:
-            logger.exception("LangGraph workflow failed for task %s", task_id)
+            logger.exception("Plan-and-Execute workflow failed for task %s", task_id)
             current_state["error"] = str(exc)
             current_state["status"] = "failed"
             current_state["updated_at"] = datetime.utcnow().isoformat()
@@ -233,6 +218,196 @@ class AgentOrchestrator:
             pass
 
         return current_state
+
+    async def _run_plan_and_execute(
+        self,
+        state: AgentState,
+        room_id: Optional[str],
+        task_id: str,
+        ws_sender: Callable = None,
+    ) -> AgentState:
+        """Run the Pilot/Planner nodes, then execute the generated agent task graph."""
+        for node_name, node_fn in (
+            ("receive_input", nodes.receive_input),
+            ("parse_intent", nodes.parse_intent),
+            ("plan_workflow", nodes.plan_workflow),
+            ("extract_tasks", nodes.extract_tasks),
+        ):
+            state = await node_fn(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+            if state.get("error"):
+                return await nodes.deliver_result(state)
+
+        state = await self._execute_agent_plan(state, room_id, task_id, ws_sender)
+        if state.get("error"):
+            state = await nodes.deliver_result(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+            return state
+
+        state = await nodes.confirm_or_modify(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+
+        state = await nodes.deliver_result(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+        return state
+
+    async def _execute_agent_plan(
+        self,
+        state: AgentState,
+        room_id: Optional[str],
+        task_id: str,
+        ws_sender: Callable = None,
+    ) -> AgentState:
+        plan = state.get("agent_plan") or {}
+        tasks = [dict(task) for task in plan.get("tasks", [])]
+        if not tasks:
+            state["agent_plan"] = nodes._build_agent_plan(state)
+            plan = state.get("agent_plan") or {}
+            tasks = [dict(task) for task in state["agent_plan"].get("tasks", [])]
+
+        completed = set(state.get("completed_task_ids", []))
+        task_results = dict(state.get("task_results") or {})
+        artifacts = dict(state.get("artifacts") or {})
+        total = max(len(tasks), 1)
+
+        while len(completed) < len(tasks):
+            ready_tasks = [
+                task for task in tasks
+                if task["id"] not in completed
+                and all(dep in completed for dep in task.get("depends_on", []))
+            ]
+            if not ready_tasks:
+                state["error"] = "Agent plan has unresolved dependencies or a cycle."
+                return state
+
+            for task in ready_tasks:
+                state = self._mark_agent_task_started(state, task, len(completed), total)
+                await self._publish_progress(room_id, task_id, state, ws_sender)
+
+                state = await self._run_agent_task(state, task)
+                if state.get("error"):
+                    task["status"] = "failed"
+                    task_results[task["id"]] = {"status": "failed", "error": state.get("error")}
+                    state["task_results"] = task_results
+                    return state
+
+                task["status"] = "completed"
+                completed.add(task["id"])
+                state["completed_task_ids"] = list(completed)
+                task_results[task["id"]] = self._task_result_payload(state, task)
+                artifacts.update(self._artifact_refs(state))
+                state["task_results"] = task_results
+                state["artifacts"] = artifacts
+                state["agent_plan"] = {**plan, "tasks": tasks, "artifacts": sorted(artifacts.keys())}
+                state["progress"] = min(0.84, 0.3 + (len(completed) / total) * 0.5)
+                state["updated_at"] = datetime.utcnow().isoformat()
+
+        return state
+
+    def _mark_agent_task_started(
+        self,
+        state: AgentState,
+        task: Dict[str, Any],
+        completed_count: int,
+        total: int,
+    ) -> AgentState:
+        state["active_agent"] = task.get("agent")
+        state["current_step"] = task.get("step") or task.get("action") or "execute_agent_task"
+        state["progress"] = STEP_PROGRESS.get(
+            state["current_step"],
+            min(0.82, 0.3 + (completed_count / max(total, 1)) * 0.5),
+        )
+        state["updated_at"] = datetime.utcnow().isoformat()
+        state.setdefault("messages", []).append({
+            "role": "system",
+            "content": f"{task.get('agent')} is executing {task.get('action')}",
+            "timestamp": state["updated_at"],
+            "step": state["current_step"],
+            "agent": task.get("agent"),
+            "agent_task_id": task.get("id"),
+        })
+        return state
+
+    async def _run_agent_task(self, state: AgentState, task: Dict[str, Any]) -> AgentState:
+        agent = task.get("agent")
+        if agent == "im_context_agent":
+            summary = await summarize_im_context(
+                messages=state.get("context_messages", []),
+                current_intent=state.get("intent", ""),
+            )
+            state["im_context_summary"] = summary
+            context_count = summary.get("source_message_count", len(state.get("context_messages") or []))
+            state.setdefault("messages", []).append({
+                "role": "assistant",
+                "content": f"IM Context Agent extracted {len(summary.get('requirements', []))} requirements, {len(summary.get('decisions', []))} decisions, and {len(summary.get('todos', []))} todos from {context_count} messages.",
+                "timestamp": datetime.utcnow().isoformat(),
+                "step": task.get("step"),
+                "agent": agent,
+                "summary": summary,
+            })
+            return state
+        if agent == "doc_agent":
+            return await nodes.generate_doc(state)
+        if agent == "canvas_agent":
+            return await nodes.generate_canvas(state)
+        if agent == "deck_agent":
+            return await nodes.generate_slides(state)
+        if agent == "rehearsal_agent":
+            if not state.get("slides_content"):
+                state["error"] = "Rehearsal Agent requires slides_content."
+                return state
+            state.setdefault("messages", []).append({
+                "role": "assistant",
+                "content": "Rehearsal Agent prepared speaker notes and Q&A from the deck.",
+                "timestamp": datetime.utcnow().isoformat(),
+                "step": task.get("step"),
+                "agent": agent,
+            })
+            return state
+        if agent == "delivery_agent":
+            return state
+
+        state["error"] = f"Unknown agent: {agent}"
+        return state
+
+    @staticmethod
+    def _artifact_refs(state: AgentState) -> Dict[str, Any]:
+        artifacts: Dict[str, Any] = {}
+        if state.get("im_context_summary"):
+            artifacts["im_context"] = {
+                "summary": state["im_context_summary"].get("summary"),
+                "requirements_count": len(state["im_context_summary"].get("requirements", [])),
+                "decisions_count": len(state["im_context_summary"].get("decisions", [])),
+            }
+        if state.get("doc_content"):
+            artifacts["document"] = {
+                "doc_id": state["doc_content"].get("doc_id"),
+                "title": state["doc_content"].get("title"),
+            }
+        if state.get("canvas_content"):
+            artifacts["canvas"] = {
+                "canvas_id": state["canvas_content"].get("canvas_id"),
+                "title": state["canvas_content"].get("title"),
+            }
+        if state.get("slides_content"):
+            artifacts["deck"] = {
+                "slide_id": state["slides_content"].get("slide_id"),
+                "title": state["slides_content"].get("title"),
+            }
+            if state["slides_content"].get("rehearsal") or state["slides_content"].get("qa"):
+                artifacts["rehearsal"] = {
+                    "qa_count": len(state["slides_content"].get("qa", [])),
+                }
+        return artifacts
+
+    def _task_result_payload(self, state: AgentState, task: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "status": "completed",
+            "agent": task.get("agent"),
+            "action": task.get("action"),
+            "artifacts": self._artifact_refs(state),
+            "completed_at": datetime.utcnow().isoformat(),
+        }
 
     def _next_step_after(self, node_name: str, state: AgentState) -> Optional[str]:
         """预测下一节点，用于长耗时节点开始前先刷新前端状态。"""

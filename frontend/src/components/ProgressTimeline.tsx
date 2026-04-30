@@ -14,8 +14,10 @@ const steps = [
   // 后端会在需要结构图时推送 generate_canvas，前端要把它纳入时间线。
   { key: 'generate_canvas', name: '生成画布', icon: '6' },
   { key: 'generate_slides', name: '生成 PPT', icon: '7' },
-  { key: 'confirm_or_modify', name: '确认修改', icon: '8' },
-  { key: 'deliver_result', name: '交付结果', icon: '9' },
+  { key: 'generate_rehearsal', name: '生成讲稿', icon: '8' },
+  { key: 'prepare_delivery', name: '准备交付', icon: '9' },
+  { key: 'confirm_or_modify', name: '确认修改', icon: '10' },
+  { key: 'deliver_result', name: '交付结果', icon: '11' },
 ]
 
 type StepStatus = 'completed' | 'active' | 'pending' | 'failed'

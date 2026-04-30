@@ -12,6 +12,7 @@ class AgentState(TypedDict, total=False):
     current_step: str
     messages: List[Dict[str, Any]]
     context_messages: List[Dict[str, Any]]
+    im_context_summary: Optional[Dict[str, Any]]
     intent_analysis: Optional[Dict[str, Any]]
     content_types: List[str]
     presentation_scene: Optional[str]
@@ -20,6 +21,12 @@ class AgentState(TypedDict, total=False):
     pending_questions: List[str]
     workflow_plan: Optional[Dict[str, Any]]
     steps: List[Dict[str, Any]]
+    agent_plan: Optional[Dict[str, Any]]
+    active_agent: Optional[str]
+    task_results: Dict[str, Any]
+    artifacts: Dict[str, Any]
+    replans: List[Dict[str, Any]]
+    completed_task_ids: List[str]
     waiting_approval: bool
     extracted_tasks: Optional[List[str]]
     doc_content: Optional[Dict[str, Any]]
@@ -52,6 +59,7 @@ def create_initial_state(
         current_step="receive_input",
         messages=[],
         context_messages=context_messages or [],
+        im_context_summary=None,
         intent_analysis=None,
         content_types=[],
         presentation_scene=None,
@@ -60,6 +68,12 @@ def create_initial_state(
         pending_questions=[],
         workflow_plan=None,
         steps=[],
+        agent_plan=None,
+        active_agent=None,
+        task_results={},
+        artifacts={},
+        replans=[],
+        completed_task_ids=[],
         waiting_approval=False,
         extracted_tasks=None,
         doc_content=None,

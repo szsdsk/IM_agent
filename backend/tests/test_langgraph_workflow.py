@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.agent.orchestrator import AgentOrchestrator
 from backend.agent import nodes
+from backend.services.llm_service import generate_canvas_spec, generate_deck_spec, llm_service, summarize_im_context
 from backend.tools.tool_factory import ToolFactory
 
 
@@ -42,6 +43,27 @@ class LangGraphRoutingTests(unittest.TestCase):
         state = {"content_types": ["canvas", "slides"], "steps": [{"module": "CANVAS"}, {"module": "DECK"}], "error": None}
 
         self.assertEqual(orchestrator._next_step_after("generate_canvas", state), "generate_slides")
+
+    def test_builds_executable_multi_agent_plan(self):
+        state = {
+            "intent": "create a management deck",
+            "workflow_plan": {"goal": "create a management deck"},
+            "content_types": ["doc", "slides"],
+            "steps": [
+                {"module": "DOC", "action": "create_doc"},
+                {"module": "DECK", "action": "generate_slides"},
+            ],
+        }
+
+        plan = nodes._build_agent_plan(state)
+        agents = [task["agent"] for task in plan["tasks"]]
+
+        self.assertEqual(plan["architecture"], "plan_and_execute")
+        self.assertEqual(agents, ["doc_agent", "deck_agent", "rehearsal_agent", "delivery_agent"])
+        self.assertEqual(plan["tasks"][1]["depends_on"], [plan["tasks"][0]["id"]])
+        self.assertEqual(plan["tasks"][2]["step"], "generate_rehearsal")
+        self.assertEqual(plan["tasks"][3]["step"], "prepare_delivery")
+        self.assertIn("sync_agent", plan["agents"])
 
 
 class FeedbackRevisionTests(unittest.IsolatedAsyncioTestCase):
@@ -163,6 +185,74 @@ class CanvasGenerationTests(unittest.IsolatedAsyncioTestCase):
         canvas_spec.assert_awaited_once()
         self.assertFalse(canvas_spec.await_args.kwargs["use_llm"])
         self.assertEqual(result["canvas_content"]["provider"], "local_mock")
+
+
+class ContentAwareGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deck_fallback_uses_document_content(self):
+        doc_content = """
+        客户续费风险预警功能V1.0 MVP需求文档
+        高风险客户识别滞后，平均仅提前3天发现流失风险。
+        核心指标：提前14天识别高风险续费客户，上线首月高风险客户召回率提升30%。
+        风险信号：登录频次下降、工单数量上升、合同到期时间、核心功能使用率。
+        第1-3天需求评审，第4-10天功能开发，第11-12天灰度测试。
+        """
+
+        with patch.object(llm_service, "mock_mode", True):
+            deck = await generate_deck_spec(
+                title="客户续费风险预警",
+                doc_content=doc_content,
+                audience="管理层",
+                presentation_scene="management_briefing",
+            )
+        all_bullets = "\n".join(
+            "\n".join(slide.get("bullets", []))
+            for slide in deck.get("slides", [])
+        )
+
+        self.assertIn("提前14天", all_bullets)
+        self.assertIn("登录频次", all_bullets)
+
+    async def test_canvas_fallback_uses_business_flow(self):
+        spec = await generate_canvas_spec(
+            title="客户续费风险预警",
+            intent="生成流程图画布",
+            doc_content="规则引擎计算风险等级，并推送飞书群，客户成功跟进后回流规则。",
+            steps=[{"module": "CANVAS", "action": "generate_canvas"}],
+            use_llm=False,
+        )
+        labels = [node["text"] for node in spec["nodes"]]
+
+        self.assertIn("规则引擎计算风险分值", labels)
+        self.assertIn("推送飞书群与工作台待办", labels)
+
+    async def test_im_context_summary_extracts_structured_fields(self):
+        messages = [
+            {"role": "产品经理", "content": "我们要上线客户续费风险预警，目标提前14天发现高风险客户。"},
+            {"role": "销售负责人", "content": "希望看到风险等级、关键原因、建议跟进动作，并推送到飞书群。"},
+            {"role": "研发负责人", "content": "第一版建议先做规则引擎，两周内完成MVP。"},
+        ]
+
+        with patch.object(llm_service, "mock_mode", True):
+            summary = await summarize_im_context(messages, "整理成文档和PPT")
+
+        self.assertIn("客户续费风险预警", summary["summary"])
+        self.assertTrue(any("规则引擎" in item for item in summary["decisions"]))
+        self.assertGreaterEqual(len(summary["requirements"]), 1)
+
+    def test_inline_im_context_adds_im_agent_to_plan(self):
+        state = {
+            "intent": "群聊上下文：产品经理说要做客户续费风险预警。请生成文档和PPT。",
+            "workflow_plan": {"goal": "create artifacts"},
+            "content_types": ["doc", "slides"],
+            "steps": [
+                {"module": "DOC", "action": "create_doc"},
+                {"module": "DECK", "action": "generate_slides"},
+            ],
+        }
+
+        plan = nodes._build_agent_plan(state)
+
+        self.assertEqual(plan["tasks"][0]["agent"], "im_context_agent")
 
 
 class DeliveryResultTests(unittest.IsolatedAsyncioTestCase):
