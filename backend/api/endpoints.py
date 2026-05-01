@@ -402,6 +402,12 @@ async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, A
         "progress": state["progress"],
         "result": state.get("result"),
         "error": state.get("error"),
+        "im_context_summary": state.get("im_context_summary"),
+        "agent_plan": state.get("agent_plan"),
+        "active_agent": state.get("active_agent"),
+        "task_results": state.get("task_results"),
+        "artifacts": state.get("artifacts"),
+        "replans": state.get("replans"),
         "im_provider": task.result_json.get("im_provider") if isinstance(task.result_json, dict) else None,
         "chat_id": task.result_json.get("chat_id") if isinstance(task.result_json, dict) else None,
     }

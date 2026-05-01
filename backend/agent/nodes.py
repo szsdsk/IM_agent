@@ -13,6 +13,7 @@ from backend.services.llm_service import (
     generate_canvas_spec,
     generate_deck_spec,
     generate_doc_content,
+    format_im_context_for_prompt,
     generate_qa,
     generate_rehearsal,
     parse_intent as llm_parse_intent,
@@ -50,6 +51,132 @@ def _workflow_modules(state: AgentState) -> set[str]:
 
 def _content_types(state: AgentState) -> set[str]:
     return {str(item).strip().lower() for item in state.get("content_types", [])}
+
+
+def _intent_with_im_context(state: AgentState) -> str:
+    im_context = format_im_context_for_prompt(state.get("im_context_summary"))
+    if not im_context:
+        return state.get("intent", "")
+    return f"{state.get('intent', '')}\n\n{im_context}"
+
+
+def _agent_for_module(module: Any) -> str:
+    module_name = _normalize_module(module)
+    return {
+        "IM_CONTEXT": "im_context_agent",
+        "DOC": "doc_agent",
+        "CANVAS": "canvas_agent",
+        "DECK": "deck_agent",
+        "REHEARSAL": "rehearsal_agent",
+        "DELIVERY": "delivery_agent",
+    }.get(module_name, "pilot_agent")
+
+
+def _step_for_agent(agent: str, action: str) -> str:
+    if agent == "im_context_agent":
+        return "parse_intent"
+    if agent == "doc_agent":
+        return "generate_doc"
+    if agent == "canvas_agent":
+        return "generate_canvas"
+    if agent == "deck_agent":
+        return "generate_slides"
+    if agent == "rehearsal_agent":
+        return "generate_rehearsal"
+    if agent == "delivery_agent":
+        return "prepare_delivery"
+    return action or "plan_workflow"
+
+
+def _build_agent_plan(state: AgentState) -> Dict[str, Any]:
+    """Convert planner output into an executable multi-agent task graph."""
+    tasks = []
+    previous_task_id = None
+
+    intent_text = str(state.get("intent", ""))
+    has_inline_im_context = any(marker in intent_text for marker in ["群聊上下文", "聊天记录", "讨论", "IM上下文", "IM 上下文"])
+    if state.get("context_messages") or has_inline_im_context:
+        tasks.append({
+            "id": "task_1_im_context",
+            "agent": "im_context_agent",
+            "module": "IM_CONTEXT",
+            "action": "summarize_context",
+            "goal": "Extract decisions, open questions, and source material from IM context.",
+            "depends_on": [],
+            "step": "parse_intent",
+            "status": "pending",
+        })
+        previous_task_id = tasks[-1]["id"]
+
+    for step in state.get("steps", []):
+        module = _normalize_module(step.get("module"))
+        if module in {"DELIVERY", "UNKNOWN"}:
+            continue
+        if module == "IM_CONTEXT" and any(task["module"] == "IM_CONTEXT" for task in tasks):
+            continue
+
+        agent = _agent_for_module(module)
+        action = step.get("action") or {
+            "DOC": "create_doc",
+            "CANVAS": "generate_canvas",
+            "DECK": "generate_slides",
+            "REHEARSAL": "generate_rehearsal",
+            "IM_CONTEXT": "summarize_context",
+        }.get(module, "execute")
+        task_id = f"task_{len(tasks) + 1}_{agent.replace('_agent', '')}"
+        depends_on = [previous_task_id] if previous_task_id else []
+        tasks.append({
+            "id": task_id,
+            "agent": agent,
+            "module": module,
+            "action": action,
+            "goal": step.get("goal") or f"{agent} will run {action}.",
+            "depends_on": depends_on,
+            "step": _step_for_agent(agent, action),
+            "status": "pending",
+            "needs_approval": bool(step.get("needs_approval", False)),
+        })
+        previous_task_id = task_id
+
+    if needs_deck(state) and not any(task["agent"] == "rehearsal_agent" for task in tasks):
+        tasks.append({
+            "id": f"task_{len(tasks) + 1}_rehearsal",
+            "agent": "rehearsal_agent",
+            "module": "REHEARSAL",
+            "action": "generate_rehearsal_and_qa",
+            "goal": "Prepare speaker notes and likely Q&A for the generated deck.",
+            "depends_on": [previous_task_id] if previous_task_id else [],
+            "step": "generate_rehearsal",
+            "status": "pending",
+        })
+        previous_task_id = tasks[-1]["id"]
+
+    tasks.append({
+        "id": f"task_{len(tasks) + 1}_delivery",
+        "agent": "delivery_agent",
+        "module": "DELIVERY",
+        "action": "archive_and_share",
+        "goal": "Package artifacts, archive the run, and share delivery links.",
+        "depends_on": [previous_task_id] if previous_task_id else [],
+        "step": "prepare_delivery",
+        "status": "pending",
+    })
+
+    return {
+        "architecture": "plan_and_execute",
+        "pilot_agent": "pilot_agent",
+        "planner_agent": "planner_agent",
+        "goal": (state.get("workflow_plan") or {}).get("goal") or state.get("intent", ""),
+        "agents": sorted({task["agent"] for task in tasks} | {"pilot_agent", "planner_agent", "sync_agent"}),
+        "tasks": tasks,
+        "artifacts": [],
+        "checkpoints": [{
+            "id": "checkpoint_final_review",
+            "after_task": tasks[-2]["id"] if len(tasks) > 1 else tasks[-1]["id"],
+            "type": "human_review",
+            "status": "pending",
+        }],
+    }
 
 
 def needs_doc(state: AgentState) -> bool:
@@ -227,6 +354,13 @@ async def plan_workflow(state: AgentState) -> AgentState:
                 requires_confirmation=True,
             )
 
+        state["agent_plan"] = _build_agent_plan(state)
+        agent_plan_text = "**Agent 编排计划**\n\n"
+        for task in state["agent_plan"].get("tasks", []):
+            deps = ", ".join(task.get("depends_on") or []) or "none"
+            agent_plan_text += f"- {task['id']}: {task['agent']} / {task['action']} (depends_on: {deps})\n"
+        _append_message(state, "assistant", agent_plan_text, "plan_workflow")
+
     except Exception as exc:
         logger.exception("Error in plan_workflow")
         _append_message(state, "assistant", f"规划出错: {str(exc)}", "plan_workflow")
@@ -234,6 +368,7 @@ async def plan_workflow(state: AgentState) -> AgentState:
             {"module": "DOC", "action": "create_doc", "needs_approval": False},
             {"module": "DECK", "action": "generate_slides", "needs_approval": False},
         ]
+        state["agent_plan"] = _build_agent_plan(state)
 
     return state
 
@@ -275,7 +410,7 @@ async def generate_doc(state: AgentState) -> AgentState:
     try:
         title = state.get("intent", "未命名文档")
         outline = (state.get("intent_analysis") or {}).get("outline")
-        content = await generate_doc_content(title, state["intent"], outline)
+        content = await generate_doc_content(title, _intent_with_im_context(state), outline)
 
         if not content:
             state["error"] = "文档内容生成失败"
@@ -331,7 +466,12 @@ async def generate_canvas(state: AgentState) -> AgentState:
         spec = await generate_canvas_spec(
             title=state.get("intent", "Agent-Pilot 画布"),
             intent=state.get("intent", ""),
-            doc_content=(state.get("doc_content") or {}).get("content", ""),
+            doc_content="\n\n".join(
+                item for item in [
+                    (state.get("doc_content") or {}).get("content", ""),
+                    format_im_context_for_prompt(state.get("im_context_summary")),
+                ] if item
+            ),
             steps=state.get("steps", []),
             # 本地 mock 画布不需要 LLM 参与，避免 Demo 卡在 generate_canvas。
             use_llm=affine_service.is_configured,
@@ -381,7 +521,12 @@ async def generate_slides(state: AgentState) -> AgentState:
     _append_message(state, "assistant", "正在生成演示稿...", "generate_slides")
 
     try:
-        doc_content = (state.get("doc_content") or {}).get("content", state["intent"])
+        doc_content = "\n\n".join(
+            item for item in [
+                (state.get("doc_content") or {}).get("content", state["intent"]),
+                format_im_context_for_prompt(state.get("im_context_summary")),
+            ] if item
+        )
         audience = state.get("audience", "管理层")
         presentation_scene = state.get("presentation_scene")
 

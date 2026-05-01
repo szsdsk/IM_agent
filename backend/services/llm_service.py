@@ -111,6 +111,17 @@ class CanvasSpec(BaseModel):
     layers: List[List[str]] = Field(default_factory=list)
 
 
+class IMContextSummary(BaseModel):
+    summary: str = ""
+    topics: List[str] = Field(default_factory=list)
+    decisions: List[str] = Field(default_factory=list)
+    requirements: List[str] = Field(default_factory=list)
+    risks: List[str] = Field(default_factory=list)
+    todos: List[str] = Field(default_factory=list)
+    stakeholders: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+
+
 class LLMService:
     """LangChain wrapper for OpenAI-compatible chat completion providers."""
 
@@ -327,6 +338,227 @@ def get_scene_profile(scene: Optional[str]) -> Dict[str, Any]:
     return SCENE_PROFILES.get(scene or "", SCENE_PROFILES["management_briefing"])
 
 
+def _clean_content_line(line: str) -> str:
+    text = str(line or "").strip()
+    for prefix in ("-", "*", "✅", "❌", "🔹", "1.", "2.", "3.", "4.", "5.", "6.", "7."):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+    return text.strip("| ").replace("  ", " ")
+
+
+def _extract_business_points(content: str, limit: int = 18) -> List[str]:
+    keywords = [
+        "提前", "风险", "续费", "召回", "投诉", "ARR", "MVP", "规则", "飞书", "客户成功",
+        "登录", "工单", "合同", "使用率", "里程碑", "灰度", "准确率", "收益", "目标",
+    ]
+    points: List[str] = []
+    for raw_line in (content or "").splitlines():
+        line = _clean_content_line(raw_line)
+        if not line or len(line) < 6:
+            continue
+        if line.startswith(("#", "flowchart", "A[", "B[", "C{")):
+            continue
+        if set(line) <= {"|", "-", " "}:
+            continue
+        if any(keyword in line for keyword in keywords) or len(points) < 4:
+            points.append(line[:120])
+        if len(points) >= limit:
+            break
+    return points
+
+
+def _pick_points(points: List[str], keywords: List[str], fallback: List[str], limit: int = 4) -> List[str]:
+    picked = [point for point in points if any(keyword in point for keyword in keywords)]
+    return (picked or fallback)[:limit]
+
+
+def _fallback_deck_spec(
+    title: str,
+    doc_content: str,
+    audience: str,
+    scene_key: str,
+    scene_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    points = _extract_business_points(doc_content)
+    pain_points = _pick_points(
+        points,
+        ["滞后", "投诉", "人工", "痛点", "重复", "效率"],
+        ["高风险客户识别滞后，挽回窗口不足", "跨部门重复触达影响客户体验", "人工排查占用客户成功大量时间"],
+    )
+    goals = _pick_points(
+        points,
+        ["目标", "提前", "召回", "投诉率", "ARR", "人效"],
+        ["提前14天识别高风险续费客户", "上线首月高风险客户召回率提升30%", "重复触达投诉率降至5%以下"],
+    )
+    scope = _pick_points(
+        points,
+        ["登录", "工单", "合同", "使用率", "风险标签", "跟进话术", "飞书"],
+        ["接入登录频次、工单数量、合同到期时间、核心功能使用率四类信号", "提供风险标签、原因解释和标准化跟进建议", "飞书群和工作台双渠道提醒"],
+    )
+    rollout = _pick_points(
+        points,
+        ["第1", "第4", "第11", "第13", "两周", "14天", "灰度"],
+        ["第1-3天完成需求评审和规则定稿", "第4-10天完成功能开发和联调", "第11-14天完成灰度测试与全量上线"],
+    )
+    risks = _pick_points(
+        points,
+        ["误判", "准确率", "跟进不及时", "数据缺失", "风险描述"],
+        ["规则准确率低：灰度期10%客户验证并周度优化", "跟进不及时：24小时未跟进触发二次提醒", "数据缺失：标记待确认并人工补全"],
+    )
+
+    return {
+        "title": "客户续费风险预警MVP项目汇报" if "续费" in doc_content else title,
+        "audience": audience,
+        "duration_minutes": scene_profile["duration_minutes"],
+        "theme": scene_profile["theme"],
+        "metadata": {
+            "presentation_scene": scene_key,
+            "template_profile": scene_key,
+            "scene_label": scene_profile["label"],
+            "fallback_generated": True,
+        },
+        "slides": [
+            {
+                "index": 0,
+                "title": "客户续费风险预警MVP项目汇报" if "续费" in doc_content else title,
+                "layout": "title",
+                "content": "2周上线，提前14天识别高风险客户",
+                "bullets": ["2周上线", "提前14天识别高风险客户", "管理层决策汇报"],
+            },
+            {"index": 1, "title": "项目背景与业务价值", "layout": "content", "content": "\n".join(pain_points + goals[:2]), "bullets": pain_points + goals[:2]},
+            {"index": 2, "title": "MVP核心能力", "layout": "content", "content": "\n".join(scope), "bullets": scope},
+            {"index": 3, "title": "落地路径与资源投入", "layout": "content", "content": "\n".join(rollout), "bullets": rollout},
+            {"index": 4, "title": "预期收益与风险控制", "layout": "two_column", "content": "\n".join(goals + risks), "bullets": goals[:3] + risks[:3]},
+            {"index": 5, "title": "Q&A", "layout": "content", "content": "请各位领导指示", "bullets": ["为什么第一版采用规则引擎？", "如何避免重复触达客户？", "投入产出比如何？"]},
+        ],
+    }
+
+
+def _enrich_deck_spec(candidate: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    deck = dict(candidate or fallback)
+    slides = list(deck.get("slides") or [])
+    fallback_slides = fallback.get("slides", [])
+    if not slides:
+        deck["slides"] = fallback_slides
+        return deck
+
+    enriched = []
+    for index, slide in enumerate(slides):
+        current = dict(slide or {})
+        fallback_slide = fallback_slides[index] if index < len(fallback_slides) else {}
+        if not current.get("title"):
+            current["title"] = fallback_slide.get("title", f"第 {index + 1} 页")
+        if not current.get("bullets"):
+            current["bullets"] = fallback_slide.get("bullets", [])
+        if not current.get("content"):
+            current["content"] = fallback_slide.get("content", "\n".join(current.get("bullets", [])))
+        current["index"] = current.get("index", index)
+        enriched.append(current)
+    deck["slides"] = enriched
+    deck.setdefault("metadata", {}).update({"content_enriched": True})
+    return deck
+
+
+def _fallback_canvas_spec(title: str, intent: str, doc_content: str, steps: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    combined = f"{intent}\n{doc_content}"
+    if any(keyword in combined for keyword in ["续费", "风险", "飞书", "规则引擎"]):
+        nodes = [
+            {"id": "n1", "text": "采集客户行为与合同数据", "type": "input"},
+            {"id": "n2", "text": "规则引擎计算风险分值", "type": "process"},
+            {"id": "n3", "text": "判定高/中/低风险等级", "type": "decision"},
+            {"id": "n4", "text": "生成风险原因与跟进建议", "type": "process"},
+            {"id": "n5", "text": "匹配客户成功经理并拦截重复触达", "type": "owner"},
+            {"id": "n6", "text": "推送飞书群与工作台待办", "type": "notification"},
+            {"id": "n7", "text": "跟进结果回流优化规则", "type": "feedback"},
+        ]
+        edges = [
+            {"source": "n1", "target": "n2", "label": "四类信号"},
+            {"source": "n2", "target": "n3", "label": "分值阈值"},
+            {"source": "n3", "target": "n4", "label": "高中风险"},
+            {"source": "n4", "target": "n5", "label": "分派负责人"},
+            {"source": "n5", "target": "n6", "label": "提醒"},
+            {"source": "n6", "target": "n7", "label": "跟进记录"},
+            {"source": "n7", "target": "n2", "label": "规则迭代"},
+        ]
+    else:
+        step_labels = [
+            str(step.get("action") or step.get("module") or f"Step {index + 1}")
+            for index, step in enumerate(steps or [])
+        ]
+        labels = step_labels or ["接收需求", "沉淀文档", "生成画布", "生成演示稿", "交付归档"]
+        nodes = [{"id": f"n{index + 1}", "text": label, "type": "process"} for index, label in enumerate(labels)]
+        edges = [
+            {"source": nodes[index]["id"], "target": nodes[index + 1]["id"], "label": ""}
+            for index in range(max(len(nodes) - 1, 0))
+        ]
+
+    return {
+        "title": "客户续费风险预警全流程闭环流程图" if "续费" in combined else title or "Agent-Pilot 结构图",
+        "diagram_type": "flow",
+        "nodes": nodes,
+        "edges": edges,
+        "layers": [],
+    }
+
+
+def _format_im_context_messages(messages: Optional[List[Dict[str, Any]]], current_intent: str = "") -> str:
+    lines = []
+    for index, message in enumerate(messages or [], 1):
+        role = message.get("role") or message.get("sender") or message.get("user") or "user"
+        content = message.get("content") or message.get("text") or message.get("message") or ""
+        if content:
+            lines.append(f"{index}. {role}: {content}")
+    if current_intent:
+        lines.append(f"Current request: {current_intent}")
+    return "\n".join(lines)
+
+
+def _fallback_im_context_summary(messages: Optional[List[Dict[str, Any]]], current_intent: str = "") -> Dict[str, Any]:
+    text = _format_im_context_messages(messages, current_intent)
+    source = text or current_intent
+    points = _extract_business_points(source, limit=24)
+
+    stakeholders = []
+    for marker in ["产品经理", "销售负责人", "数据同学", "客服负责人", "客户成功", "研发负责人", "设计同学", "运营"]:
+        if marker in source and marker not in stakeholders:
+            stakeholders.append(marker)
+
+    return {
+        "summary": "团队正在讨论客户续费风险预警能力，目标是提前识别高风险客户，并通过文档、画布和汇报材料沉淀方案。" if "续费" in source else (points[0] if points else source[:160]),
+        "topics": _pick_points(points, ["续费", "风险", "预警", "飞书", "MVP"], ["客户续费风险预警", "跨部门协同", "MVP落地"]),
+        "decisions": _pick_points(points, ["第一版", "规则引擎", "两周", "MVP", "不做"], ["第一版采用规则引擎", "两周内完成MVP"]),
+        "requirements": _pick_points(points, ["希望", "需要", "目标", "页面", "信号", "推送"], ["展示风险等级、关键原因和建议跟进动作", "推送到飞书群", "生成客户列表、风险标签和跟进话术"]),
+        "risks": _pick_points(points, ["重复", "打扰", "投诉", "复杂", "滞后"], ["避免重复触达客户", "控制MVP范围，不引入复杂机器学习模型"]),
+        "todos": _pick_points(points, ["完成", "上线", "评审", "联调", "灰度"], ["确认风险判定规则", "完成MVP开发和灰度验证"]),
+        "stakeholders": stakeholders,
+        "open_questions": [],
+        "source_message_count": len(messages or []),
+    }
+
+
+def format_im_context_for_prompt(summary: Optional[Dict[str, Any]]) -> str:
+    if not summary:
+        return ""
+    sections = [
+        ("Summary", [summary.get("summary", "")]),
+        ("Topics", summary.get("topics", [])),
+        ("Decisions", summary.get("decisions", [])),
+        ("Requirements", summary.get("requirements", [])),
+        ("Risks", summary.get("risks", [])),
+        ("Todos", summary.get("todos", [])),
+        ("Stakeholders", summary.get("stakeholders", [])),
+        ("Open Questions", summary.get("open_questions", [])),
+    ]
+    lines = ["# IM Context Summary"]
+    for title, values in sections:
+        clean_values = [str(value).strip() for value in values if str(value).strip()]
+        if not clean_values:
+            continue
+        lines.append(f"## {title}")
+        lines.extend(f"- {value}" for value in clean_values)
+    return "\n".join(lines)
+
+
 SYSTEM_PROMPTS = {
     "intent_parser": """你是一个任务规划助手。用户会通过 IM 输入需求，你需要：
 1. 理解用户的核心意图
@@ -394,6 +626,13 @@ SYSTEM_PROMPTS = {
 - architecture 使用 layers。""",
 }
 
+SYSTEM_PROMPTS["im_context_summarizer"] = (
+    "You are an IM context analysis agent for a multi-agent office assistant. "
+    "Extract structured, reusable context from chat history and the current request. "
+    "Focus on business background, stakeholder opinions, decisions, requirements, risks, todos, and open questions. "
+    "Return concise structured data that downstream document, canvas, and deck agents can use."
+)
+
 SYSTEM_PROMPTS["doc_reviser"] = (
     "You revise an existing markdown document based on user feedback. "
     "Keep the original topic and most structure stable, but apply the requested changes clearly. "
@@ -427,6 +666,29 @@ async def parse_intent(user_input: str, context: Optional[List[Dict]] = None) ->
         system_prompt=SYSTEM_PROMPTS["intent_parser"],
         default=default,
     ) or default
+
+
+async def summarize_im_context(
+    messages: Optional[List[Dict[str, Any]]] = None,
+    current_intent: str = "",
+) -> Dict[str, Any]:
+    default = _fallback_im_context_summary(messages, current_intent)
+    content = _format_im_context_messages(messages, current_intent)
+    if not content:
+        return default
+
+    result = await llm_service.structured_chat(
+        [{"role": "user", "content": content[:8000]}],
+        IMContextSummary,
+        system_prompt=SYSTEM_PROMPTS["im_context_summarizer"],
+        default=default,
+        temperature=0.1,
+    ) or default
+    return {
+        **default,
+        **result,
+        "source_message_count": len(messages or []),
+    }
 
 
 async def plan_workflow(intent: str, context: Optional[Dict] = None) -> Dict[str, Any]:
@@ -495,6 +757,7 @@ async def generate_deck_spec(
             {"index": 5, "title": outline[-1], "layout": "content", "content": "行动与收尾", "bullets": []},
         ],
     }
+    default = _fallback_deck_spec(title, doc_content, audience, scene_key, scene_profile)
     prompt = (
         f"文档标题：{title}\n\n"
         f"文档内容：\n{doc_content[:4000]}\n\n"
@@ -505,12 +768,13 @@ async def generate_deck_spec(
     )
 
 
-    return await llm_service.structured_chat(
+    generated = await llm_service.structured_chat(
         [{"role": "user", "content": prompt}],
         DeckSpecModel,
         system_prompt=SYSTEM_PROMPTS["slides_generator"],
         default=default,
     ) or default
+    return _enrich_deck_spec(generated, default)
 
 
 async def generate_rehearsal(deck_spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -643,6 +907,7 @@ async def generate_canvas_spec(
         "edges": default_edges,
         "layers": [],
     }
+    default = _fallback_canvas_spec(title, intent, doc_content, steps)
     if not use_llm:
         return default
 
