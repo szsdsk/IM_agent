@@ -414,7 +414,12 @@ async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, A
     task.updated_at = datetime.utcnow()
 
     if state.get("doc_content"):
-        existing_doc_result = await db.execute(select(Document).where(Document.task_id == task.id))
+        existing_doc_result = await db.execute(
+            select(Document)
+            .where(Document.task_id == task.id)
+            .order_by(Document.updated_at.desc(), Document.created_at.desc())
+            .limit(1)
+        )
         document = existing_doc_result.scalar_one_or_none()
         if not document:
             document = Document(task_id=task.id)
@@ -428,7 +433,12 @@ async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, A
         document.updated_at = datetime.utcnow()
 
     if state.get("slides_content"):
-        existing_slide_result = await db.execute(select(Slide).where(Slide.task_id == task.id))
+        existing_slide_result = await db.execute(
+            select(Slide)
+            .where(Slide.task_id == task.id)
+            .order_by(Slide.updated_at.desc(), Slide.created_at.desc())
+            .limit(1)
+        )
         slide = existing_slide_result.scalar_one_or_none()
         if not slide:
             slide = Slide(task_id=task.id)

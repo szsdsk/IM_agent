@@ -1,12 +1,14 @@
 from __future__ import annotations
+
+"""DeckSpec renderers.
+
+The PPTX renderer intentionally keeps layout decisions deterministic: the LLM
+provides content and intent, while this module draws stable visual structures.
 """
-Deck Renderer - PPT 渲染器
-DeckSpec -> Slidev Markdown / PptxGenJS
-"""
-import os
+
 import logging
-from typing import Dict, Any, Optional
-from pathlib import Path
+import os
+from typing import Any, Dict
 
 from backend.services.deck_spec import DeckSpec, SlideSpec, ThemeConfig
 
@@ -14,107 +16,47 @@ logger = logging.getLogger(__name__)
 
 
 class SlidevRenderer:
-    """Slidev Markdown 渲染器"""
+    """Render DeckSpec into simple Slidev markdown."""
 
     def __init__(self, output_dir: str = None):
         self.output_dir = output_dir or "./data/slides"
         os.makedirs(self.output_dir, exist_ok=True)
 
     def render(self, deck: DeckSpec) -> str:
-        """将 DeckSpec 渲染为 Slidev Markdown"""
         lines = [
             "---",
             f"title: {deck.title}",
-            f"author: Agent-Pilot",
+            "author: Agent-Pilot",
             "transition: fade",
             "theme: default",
             "---",
             "",
         ]
-
         for slide in deck.slides:
             lines.extend(self._render_slide(slide))
             lines.append("")
-
         return "\n".join(lines)
 
-    def _render_slide(self, slide: SlideSpec) -> list:
-        """渲染单页幻灯片"""
-        lines = []
-
-        if slide.layout == "title":
-            lines.extend([
-                f"# {slide.title}",
-                "",
-                f"<!-- slide {slide.index + 1} -->",
-            ])
-        elif slide.layout == "content":
-            lines.extend([
-                f"## {slide.title}",
-                "",
-            ])
-            for bullet in slide.bullets:
-                lines.append(f"- {bullet}")
-            lines.append("")
-        elif slide.layout == "two_column":
-            lines.extend([
-                f"## {slide.title}",
-                "",
-                "<div style='display: flex; gap: 2rem;'>",
-                "<div>",
-            ])
-            mid = len(slide.bullets) // 2
-            for bullet in slide.bullets[:mid]:
-                lines.append(f"- {bullet}")
-            lines.extend([
-                "</div>",
-                "<div>",
-            ])
-            for bullet in slide.bullets[mid:]:
-                lines.append(f"- {bullet}")
-            lines.extend([
-                "</div>",
-                "</div>",
-            ])
-        elif slide.layout == "diagram":
-            lines.extend([
-                f"## {slide.title}",
-                "",
-                ":::diagram",
-                f"![Diagram]({slide.diagram_ref or ''})",
-                ":::",
-            ])
-        elif slide.layout == "image":
-            lines.extend([
-                f"## {slide.title}",
-                "",
-                f"![{slide.title}]({slide.image_ref or ''})",
-            ])
-
-        # 演讲者备注
+    def _render_slide(self, slide: SlideSpec) -> list[str]:
+        lines = [f"## {slide.title}", ""]
+        for bullet in slide.bullets:
+            lines.append(f"- {bullet}")
         if slide.speaker_notes:
-            lines.append("")
-            lines.append(f"// {slide.speaker_notes}")
-
+            lines.extend(["", f"// {slide.speaker_notes}"])
         return lines
 
     def render_to_file(self, deck: DeckSpec, filename: str = None) -> str:
-        """渲染并保存为 Markdown 文件"""
         if filename is None:
             filename = f"{deck.title.replace(' ', '_')}_{int(__import__('time').time())}.md"
-
         path = os.path.join(self.output_dir, filename)
-        content = self.render(deck)
-
         with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        logger.info(f"Slidev markdown saved to {path}")
+            f.write(self.render(deck))
+        logger.info("Slidev markdown saved to %s", path)
         return path
 
 
 class PptxGenRenderer:
-    """PptxGenJS / python-pptx 渲染器，支持主题模板"""
+    """Render normalized DeckSpec into a richer PPTX file with python-pptx."""
 
     def __init__(self, output_dir: str = None):
         self.output_dir = output_dir or "./data/slides"
@@ -123,27 +65,30 @@ class PptxGenRenderer:
     @staticmethod
     def _hex_to_rgb(hex_color: str):
         from pptx.dml.color import RGBColor
-        h = hex_color.lstrip("#")
+
+        h = (hex_color or "#111827").lstrip("#")
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+    @staticmethod
+    def _safe_text(value: Any, limit: int = 120) -> str:
+        if value is None:
+            return ""
+        text = str(value).replace("\n", " ").strip()
+        return text if len(text) <= limit else f"{text[:limit - 1]}..."
 
     async def render(self, deck: DeckSpec, filename: str = None) -> Dict[str, Any]:
         if filename is None:
             filename = f"{deck.title.replace(' ', '_')}.pptx"
-
         filepath = os.path.join(self.output_dir, filename)
 
         try:
             from pptx import Presentation
-            from pptx.util import Inches, Pt, Emu
-            from pptx.dml.color import RGBColor
-            from pptx.enum.text import PP_ALIGN
+            from pptx.util import Inches
         except ImportError:
             logger.warning("python-pptx not installed")
             return {"success": False, "error": "python-pptx not installed"}
 
         theme = ThemeConfig.get_theme(deck.theme)
-        colors = theme.colors
-
         prs = Presentation()
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
@@ -152,7 +97,6 @@ class PptxGenRenderer:
             self._add_slide(prs, slide_spec, theme)
 
         prs.save(filepath)
-
         return {
             "success": True,
             "filepath": filepath,
@@ -160,327 +104,440 @@ class PptxGenRenderer:
             "title": deck.title,
         }
 
-    def _add_slide(self, prs, slide: SlideSpec, theme: ThemeConfig):
-        from pptx.util import Inches, Pt
-        from pptx.enum.text import PP_ALIGN
-
-        colors = theme.colors
-        layout = prs.slide_layouts[6]  # blank
+    def _add_slide(self, prs, slide: SlideSpec, theme: ThemeConfig) -> None:
+        layout = prs.slide_layouts[6]
         slide_obj = prs.slides.add_slide(layout)
+        self._apply_slide_background(slide_obj, theme, slide.index + 1)
 
-        # Background
-        bg = slide_obj.background
-        fill = bg.fill
-        fill.solid()
-        fill.fore_color.rgb = self._hex_to_rgb(colors.bg_white)
-
-        # Bottom accent bar
-        bar = slide_obj.shapes.add_shape(
-            1,  # MSO_SHAPE.RECTANGLE
-            Inches(0), Inches(7.1), Inches(13.333), Inches(0.4)
-        )
-        bar_fill = bar.fill
-        bar_fill.solid()
-        bar_fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
-        bar.line.fill.background()
-
-        # Page number
-        page_box = slide_obj.shapes.add_textbox(
-            Inches(12.5), Inches(7.12), Inches(0.7), Inches(0.3)
-        )
-        page_tf = page_box.text_frame
-        page_p = page_tf.paragraphs[0]
-        page_p.text = str(slide.index + 1)
-        page_p.font.size = Pt(10)
-        page_p.font.color.rgb = self._hex_to_rgb(colors.text_light)
-        page_p.alignment = PP_ALIGN.RIGHT
-
-        # Dispatch layout
-        if slide.layout == "title":
-            self._render_title_layout(slide_obj, slide, theme)
-        elif slide.layout == "content":
-            self._render_content_layout(slide_obj, slide, theme)
-        elif slide.layout == "two_column":
-            self._render_two_column_layout(slide_obj, slide, theme)
-        elif slide.layout == "diagram":
-            self._render_diagram_layout(slide_obj, slide, theme)
+        if slide.layout in {"title", "hero"}:
+            self._render_hero_layout(slide_obj, slide, theme)
+        elif slide.layout == "section_divider":
+            self._render_section_divider_layout(slide_obj, slide, theme)
+        elif slide.layout == "metrics":
+            self._render_metrics_layout(slide_obj, slide, theme)
+        elif slide.layout == "timeline":
+            self._render_timeline_layout(slide_obj, slide, theme)
+        elif slide.layout in {"two_column", "comparison"}:
+            self._render_comparison_layout(slide_obj, slide, theme)
+        elif slide.layout in {"diagram", "process"}:
+            self._render_process_layout(slide_obj, slide, theme)
+        elif slide.layout == "cards":
+            self._render_cards_layout(slide_obj, slide, theme)
+        elif slide.layout == "closing":
+            self._render_closing_layout(slide_obj, slide, theme)
         else:
             self._render_content_layout(slide_obj, slide, theme)
 
-        # Speaker notes
         if slide.speaker_notes:
-            notes_slide = slide_obj.notes_slide
-            notes_slide.notes_text_frame.text = slide.speaker_notes
+            slide_obj.notes_slide.notes_text_frame.text = slide.speaker_notes
 
-    def _render_title_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig):
-        from pptx.util import Inches, Pt
+    def _apply_slide_background(self, slide_obj, theme: ThemeConfig, page_number: int) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
         from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches, Pt
 
         colors = theme.colors
+        theme_name = theme.name
+        fill = slide_obj.background.fill
+        fill.solid()
+        fill.fore_color.rgb = self._hex_to_rgb(colors.bg_white)
 
-        # Top accent strip
-        strip = slide_obj.shapes.add_shape(
-            1, Inches(0), Inches(0), Inches(13.333), Inches(0.15)
-        )
-        strip_fill = strip.fill
-        strip_fill.solid()
-        strip_fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
-        strip.line.fill.background()
+        # 每套主题使用不同的底纹语言，避免所有页面都像同一张卡片模板。
+        if theme_name == "entertainment":
+            for x, y, size, color in [
+                (10.35, -1.3, 3.8, colors.primary_light),
+                (9.25, 4.85, 2.2, colors.accent),
+                (-0.95, 5.25, 2.1, colors.primary_light),
+            ]:
+                orb = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x), Inches(y), Inches(size), Inches(size))
+                orb.fill.solid()
+                orb.fill.fore_color.rgb = self._hex_to_rgb(color)
+                orb.line.fill.background()
+            ribbon = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0.18), Inches(13.333), Inches(0.14))
+            ribbon.rotation = -4
+            ribbon.fill.solid()
+            ribbon.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+            ribbon.line.fill.background()
+        elif theme_name == "tech_dark":
+            rail = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(0.18), Inches(7.5))
+            rail.fill.solid()
+            rail.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+            rail.line.fill.background()
+            for i in range(4):
+                stripe = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(9.8 + i * 0.55), Inches(0.5 + i * 0.45), Inches(2.2), Inches(0.04))
+                stripe.fill.solid()
+                stripe.fill.fore_color.rgb = self._hex_to_rgb(colors.divider)
+                stripe.line.fill.background()
+        else:
+            accent = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(10.75), Inches(-1.25), Inches(3.8), Inches(3.8))
+            accent.fill.solid()
+            accent.fill.fore_color.rgb = self._hex_to_rgb(colors.primary_light)
+            accent.line.fill.background()
 
-        # Title - centered, large
-        title_box = slide_obj.shapes.add_textbox(
-            Inches(1.5), Inches(2.2), Inches(10.333), Inches(2)
-        )
-        tf = title_box.text_frame
+        bar = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(7.1), Inches(13.333), Inches(0.4))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
+        bar.line.fill.background()
+
+        page_box = slide_obj.shapes.add_textbox(Inches(12.45), Inches(7.12), Inches(0.75), Inches(0.3))
+        p = page_box.text_frame.paragraphs[0]
+        p.text = str(page_number)
+        p.font.size = Pt(10)
+        p.font.color.rgb = self._hex_to_rgb(colors.text_light)
+        p.alignment = PP_ALIGN.RIGHT
+
+    def _add_text(
+        self,
+        slide_obj,
+        text: str,
+        x,
+        y,
+        w,
+        h,
+        theme: ThemeConfig,
+        size: int = 16,
+        bold: bool = False,
+        color: str = None,
+        align=None,
+    ):
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Pt
+
+        box = slide_obj.shapes.add_textbox(x, y, w, h)
+        tf = box.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
-        p.text = slide.title
-        p.font.size = Pt(theme.title_size + 8)
-        p.font.bold = True
-        p.font.color.rgb = self._hex_to_rgb(colors.primary)
-        p.font.name = theme.font_title
-        p.alignment = PP_ALIGN.CENTER
+        p.text = text
+        p.font.size = Pt(size)
+        p.font.bold = bold
+        p.font.name = theme.font_body
+        p.font.color.rgb = self._hex_to_rgb(color or theme.colors.text_dark)
+        p.alignment = align or PP_ALIGN.LEFT
+        return box
 
-        # Subtitle area (from bullets or content)
-        subtitle_text = ""
-        if slide.bullets:
-            subtitle_text = slide.bullets[0] if len(slide.bullets) == 1 else " | ".join(slide.bullets[:3])
+    def _add_card(self, slide_obj, x, y, w, h, theme: ThemeConfig, fill: str = None, line: str = None):
+        from pptx.enum.shapes import MSO_SHAPE
 
-        if subtitle_text:
-            sub_box = slide_obj.shapes.add_textbox(
-                Inches(2), Inches(4.4), Inches(9.333), Inches(1)
-            )
-            sub_tf = sub_box.text_frame
-            sub_tf.word_wrap = True
-            sub_p = sub_tf.paragraphs[0]
-            sub_p.text = subtitle_text
-            sub_p.font.size = Pt(theme.body_size)
-            sub_p.font.color.rgb = self._hex_to_rgb(colors.text_muted)
-            sub_p.font.name = theme.font_body
-            sub_p.alignment = PP_ALIGN.CENTER
+        shape = slide_obj.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h)
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = self._hex_to_rgb(fill or theme.colors.bg_light)
+        shape.line.color.rgb = self._hex_to_rgb(line or theme.colors.divider)
+        return shape
 
-    def _render_content_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig):
-        from pptx.util import Inches, Pt
+    def _add_rule(self, slide_obj, x, y, w, h, color: str):
+        from pptx.enum.shapes import MSO_SHAPE
+
+        rule = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, w, h)
+        rule.fill.solid()
+        rule.fill.fore_color.rgb = self._hex_to_rgb(color)
+        rule.line.fill.background()
+        return rule
+
+    def _add_title_header(self, slide_obj, slide: SlideSpec, theme: ThemeConfig, eyebrow: str) -> None:
         from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
 
         colors = theme.colors
+        self._add_text(slide_obj, eyebrow, Inches(0.78), Inches(0.32), Inches(3.2), Inches(0.26), theme, 9, True, colors.accent)
+        self._add_text(slide_obj, self._safe_text(slide.title, 48), Inches(0.75), Inches(0.62), Inches(10.8), Inches(0.62), theme, 28, True, colors.text_dark, PP_ALIGN.LEFT)
+        self._add_rule(slide_obj, Inches(0.75), Inches(1.38), Inches(1.35), Inches(0.06), colors.accent)
 
-        # Title bar with primary background
-        title_bg = slide_obj.shapes.add_shape(
-            1, Inches(0), Inches(0), Inches(13.333), Inches(1.3)
-        )
-        title_bg_fill = title_bg.fill
-        title_bg_fill.solid()
-        title_bg_fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
-        title_bg.line.fill.background()
+    def _slide_bullets(self, slide: SlideSpec, limit: int = 6) -> list[str]:
+        bullets = [self._safe_text(item, 88) for item in (slide.bullets or []) if str(item).strip()]
+        if not bullets and slide.content:
+            if isinstance(slide.content, str):
+                bullets = [self._safe_text(line.strip("-• "), 88) for line in slide.content.splitlines() if line.strip()]
+            elif isinstance(slide.content, dict):
+                bullets = [self._safe_text(value, 88) for value in slide.content.values() if value]
+            elif isinstance(slide.content, list):
+                bullets = [self._safe_text(value, 88) for value in slide.content if value]
+        return bullets[:limit]
 
-        # Title text on colored bar
-        title_box = slide_obj.shapes.add_textbox(
-            Inches(0.8), Inches(0.2), Inches(11.733), Inches(0.9)
-        )
-        tf = title_box.text_frame
-        tf.word_wrap = True
-        p = tf.paragraphs[0]
-        p.text = slide.title
-        p.font.size = Pt(theme.title_size)
-        p.font.bold = True
-        p.font.color.rgb = self._hex_to_rgb(colors.text_light)
-        p.font.name = theme.font_title
-        p.alignment = PP_ALIGN.LEFT
-
-        # Content area
-        if slide.bullets:
-            content_box = slide_obj.shapes.add_textbox(
-                Inches(1.0), Inches(1.8), Inches(11.333), Inches(4.8)
-            )
-            content_tf = content_box.text_frame
-            content_tf.word_wrap = True
-
-            for i, bullet in enumerate(slide.bullets):
-                if i == 0:
-                    para = content_tf.paragraphs[0]
-                else:
-                    para = content_tf.add_paragraph()
-
-                para.text = f"▸  {bullet}"
-                para.font.size = Pt(theme.bullet_size)
-                para.font.color.rgb = self._hex_to_rgb(colors.text_dark)
-                para.font.name = theme.font_body
-                para.space_after = Pt(10)
-
-    def _render_two_column_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig):
-        from pptx.util import Inches, Pt
+    def _render_hero_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
         from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
 
         colors = theme.colors
+        if theme.name == "entertainment":
+            stage = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(7.1))
+            stage.fill.solid()
+            stage.fill.fore_color.rgb = self._hex_to_rgb(colors.bg_dark)
+            stage.line.fill.background()
 
-        # Title bar
-        title_bg = slide_obj.shapes.add_shape(
-            1, Inches(0), Inches(0), Inches(13.333), Inches(1.3)
-        )
-        title_bg_fill = title_bg.fill
-        title_bg_fill.solid()
-        title_bg_fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
-        title_bg.line.fill.background()
+            moon = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(8.75), Inches(0.55), Inches(3.3), Inches(3.3))
+            moon.fill.solid()
+            moon.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+            moon.line.fill.background()
+            halo = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(7.45), Inches(3.95), Inches(4.6), Inches(4.6))
+            halo.fill.solid()
+            halo.fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
+            halo.line.fill.background()
 
-        title_box = slide_obj.shapes.add_textbox(
-            Inches(0.8), Inches(0.2), Inches(11.733), Inches(0.9)
-        )
-        tf = title_box.text_frame
-        p = tf.paragraphs[0]
-        p.text = slide.title
-        p.font.size = Pt(theme.title_size)
-        p.font.bold = True
-        p.font.color.rgb = self._hex_to_rgb(colors.text_light)
-        p.font.name = theme.font_title
+            self._add_rule(slide_obj, Inches(0.82), Inches(0.82), Inches(0.12), Inches(5.35), colors.accent)
+            self._add_text(slide_obj, "ENTERTAINMENT DECK", Inches(1.18), Inches(0.95), Inches(4.6), Inches(0.34), theme, 10, True, colors.accent)
+            self._add_text(slide_obj, self._safe_text(slide.title, 52), Inches(1.08), Inches(1.65), Inches(7.45), Inches(2.0), theme, 42, True, colors.text_light)
+            bullets = self._slide_bullets(slide, 3)
+            subtitle = " / ".join(bullets) if bullets else self._safe_text(slide.content, 88)
+            if subtitle:
+                self._add_text(slide_obj, subtitle, Inches(1.12), Inches(4.22), Inches(6.9), Inches(0.75), theme, 16, False, colors.primary_light)
+            for i, item in enumerate(bullets[:3]):
+                y = 5.35 + i * 0.36
+                self._add_rule(slide_obj, Inches(8.92), Inches(y), Inches(0.48), Inches(0.06), colors.accent)
+                self._add_text(slide_obj, self._safe_text(item, 24), Inches(9.55), Inches(y - 0.1), Inches(2.4), Inches(0.24), theme, 10, True, colors.text_light)
+            return
 
-        # Two columns
-        mid = max(1, len(slide.bullets) // 2)
-        left_bullets = slide.bullets[:mid]
-        right_bullets = slide.bullets[mid:]
+        hero_bg = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(7.1))
+        hero_bg.fill.solid()
+        hero_bg.fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
+        hero_bg.line.fill.background()
 
-        # Divider line
-        divider = slide_obj.shapes.add_shape(
-            1, Inches(6.666), Inches(1.6), Inches(0.02), Inches(5)
-        )
-        divider_fill = divider.fill
-        divider_fill.solid()
-        divider_fill.fore_color.rgb = self._hex_to_rgb(colors.divider)
-        divider.line.fill.background()
+        glow = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(8.7), Inches(0.55), Inches(4.2), Inches(4.2))
+        glow.fill.solid()
+        glow.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+        glow.line.fill.background()
 
-        for bullets, x_pos in [(left_bullets, Inches(0.8)), (right_bullets, Inches(7.0))]:
-            col_box = slide_obj.shapes.add_textbox(
-                x_pos, Inches(1.8), Inches(5.5), Inches(4.8)
-            )
-            col_tf = col_box.text_frame
-            col_tf.word_wrap = True
+        self._add_rule(slide_obj, Inches(0.82), Inches(0.85), Inches(0.1), Inches(5.1), colors.accent)
 
-            for i, bullet in enumerate(bullets):
-                para = col_tf.paragraphs[0] if i == 0 else col_tf.add_paragraph()
-                para.text = f"▸  {bullet}"
-                para.font.size = Pt(theme.bullet_size)
-                para.font.color.rgb = self._hex_to_rgb(colors.text_dark)
-                para.font.name = theme.font_body
-                para.space_after = Pt(10)
+        self._add_text(slide_obj, (slide.visual_profile or "Agent-Pilot").upper(), Inches(1.28), Inches(1.24), Inches(4.0), Inches(0.3), theme, 10, True, colors.accent)
+        self._add_text(slide_obj, self._safe_text(slide.title, 56), Inches(1.23), Inches(1.72), Inches(7.8), Inches(1.8), theme, 40, True, colors.text_light)
+        bullets = self._slide_bullets(slide, 3)
+        subtitle = " | ".join(bullets) if bullets else self._safe_text(slide.content, 88)
+        if subtitle:
+            self._add_text(slide_obj, subtitle, Inches(1.3), Inches(3.75), Inches(7.4), Inches(0.72), theme, 17, False, colors.primary_light)
+        for i, item in enumerate(bullets[:3]):
+            x = Inches(1.25 + i * 2.35)
+            self._add_card(slide_obj, x, Inches(5.0), Inches(2.05), Inches(0.65), theme, colors.primary_light, colors.primary_light)
+            self._add_text(slide_obj, self._safe_text(item, 18), x + Inches(0.12), Inches(5.18), Inches(1.8), Inches(0.24), theme, 10, True, colors.primary, PP_ALIGN.CENTER)
 
-    def _render_diagram_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig):
-        from pptx.util import Inches, Pt
+    def _render_content_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
         from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
 
         colors = theme.colors
+        self._add_title_header(slide_obj, slide, theme, "KEY POINTS")
+        self._add_rule(slide_obj, Inches(0.88), Inches(1.78), Inches(0.08), Inches(4.75), colors.primary)
+        for i, bullet in enumerate(self._slide_bullets(slide, 6)):
+            y = Inches(1.85 + i * 0.78)
+            dot = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.72), y + Inches(0.12), Inches(0.38), Inches(0.38))
+            dot.fill.solid()
+            dot.fill.fore_color.rgb = self._hex_to_rgb(colors.accent if i == 0 else colors.primary_light)
+            dot.line.fill.background()
+            self._add_text(slide_obj, f"{i + 1:02d}", Inches(1.28), y + Inches(0.06), Inches(0.52), Inches(0.25), theme, 10, True, colors.accent, PP_ALIGN.LEFT)
+            self._add_text(slide_obj, bullet, Inches(1.92), y, Inches(9.75), Inches(0.48), theme, 16 if i == 0 else 14, i == 0, colors.text_dark)
 
-        # Title bar
-        title_bg = slide_obj.shapes.add_shape(
-            1, Inches(0), Inches(0), Inches(13.333), Inches(1.3)
-        )
-        title_bg_fill = title_bg.fill
-        title_bg_fill.solid()
-        title_bg_fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
-        title_bg.line.fill.background()
+    def _render_section_divider_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.util import Inches
 
-        title_box = slide_obj.shapes.add_textbox(
-            Inches(0.8), Inches(0.2), Inches(11.733), Inches(0.9)
-        )
-        tf = title_box.text_frame
-        p = tf.paragraphs[0]
-        p.text = slide.title
-        p.font.size = Pt(theme.title_size)
-        p.font.bold = True
-        p.font.color.rgb = self._hex_to_rgb(colors.text_light)
-        p.font.name = theme.font_title
+        colors = theme.colors
+        banner = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(-0.35), Inches(1.45), Inches(14.2), Inches(2.4))
+        banner.rotation = -3
+        banner.fill.solid()
+        banner.fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
+        banner.line.fill.background()
+        side = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(9.55), Inches(0.92), Inches(2.6), Inches(2.6))
+        side.fill.solid()
+        side.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+        side.line.fill.background()
+        self._add_text(slide_obj, self._safe_text(slide.title, 48), Inches(1.15), Inches(2.08), Inches(8.8), Inches(0.9), theme, 36, True, colors.text_light)
+        for i, bullet in enumerate(self._slide_bullets(slide, 4)):
+            self._add_rule(slide_obj, Inches(1.22), Inches(4.35 + i * 0.48), Inches(0.42), Inches(0.05), colors.accent)
+            self._add_text(slide_obj, bullet, Inches(1.85), Inches(4.22 + i * 0.48), Inches(9.4), Inches(0.32), theme, 14, False, colors.text_dark)
 
-        # Placeholder diagram area
-        placeholder = slide_obj.shapes.add_shape(
-            1, Inches(1.5), Inches(2.0), Inches(10.333), Inches(4.5)
-        )
-        ph_fill = placeholder.fill
-        ph_fill.solid()
-        ph_fill.fore_color.rgb = self._hex_to_rgb(colors.bg_light)
-        placeholder.line.color.rgb = self._hex_to_rgb(colors.divider)
-        placeholder.line.width = Pt(1)
+    def _render_metrics_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
 
-        # Label
-        label_box = slide_obj.shapes.add_textbox(
-            Inches(4), Inches(3.8), Inches(5.333), Inches(0.8)
-        )
-        label_tf = label_box.text_frame
-        label_p = label_tf.paragraphs[0]
-        label_p.text = "[ 图表 / 架构图区域 ]"
-        label_p.font.size = Pt(16)
-        label_p.font.color.rgb = self._hex_to_rgb(colors.text_muted)
-        label_p.alignment = PP_ALIGN.CENTER
+        colors = theme.colors
+        self._add_title_header(slide_obj, slide, theme, "METRICS")
+        metrics = slide.highlight_metrics or []
+        if not metrics:
+            self._render_cards_layout(slide_obj, slide, theme)
+            return
+        self._add_rule(slide_obj, Inches(0.95), Inches(3.48), Inches(11.25), Inches(0.05), colors.divider)
+        positions = [(0.95, 2.05), (4.45, 2.05), (7.95, 2.05), (2.7, 4.35), (6.45, 4.35)]
+        for index, metric in enumerate(metrics[:5]):
+            x, y = positions[index]
+            if index < 3:
+                self._add_rule(slide_obj, Inches(x), Inches(y + 1.02), Inches(2.35), Inches(0.06), colors.accent)
+            self._add_text(slide_obj, self._safe_text(metric.get("value"), 14), Inches(x), Inches(y), Inches(2.75), Inches(0.62), theme, 34, True, colors.primary, PP_ALIGN.LEFT)
+            self._add_text(slide_obj, self._safe_text(metric.get("label"), 42), Inches(x + 0.03), Inches(y + 0.82), Inches(2.65), Inches(0.5), theme, 12, False, colors.text_muted, PP_ALIGN.LEFT)
+
+    def _render_timeline_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
+
+        colors = theme.colors
+        self._add_title_header(slide_obj, slide, theme, "TIMELINE")
+        items = slide.timeline or [{"label": f"Phase {i + 1}", "text": item} for i, item in enumerate(self._slide_bullets(slide, 5))]
+        if not items:
+            self._render_content_layout(slide_obj, slide, theme)
+            return
+        start_x, y = 1.05, 3.05
+        gap = 10.9 / max(len(items[:5]) - 1, 1)
+        line = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(start_x), Inches(y + 0.25), Inches(10.9), Inches(0.08))
+        line.fill.solid()
+        line.fill.fore_color.rgb = self._hex_to_rgb(colors.primary_light)
+        line.line.fill.background()
+        for index, item in enumerate(items[:5]):
+            x = start_x + index * gap
+            dot = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x), Inches(y - 0.1), Inches(0.65), Inches(0.65))
+            dot.fill.solid()
+            dot.fill.fore_color.rgb = self._hex_to_rgb(colors.primary if index % 2 == 0 else colors.accent)
+            dot.line.fill.background()
+            self._add_text(slide_obj, f"{index + 1}", Inches(x + 0.15), Inches(y + 0.07), Inches(0.32), Inches(0.2), theme, 11, True, colors.text_light, PP_ALIGN.CENTER)
+            label_y = y - 0.82 if index % 2 == 0 else y + 0.85
+            body_y = y - 0.42 if index % 2 == 0 else y + 1.25
+            self._add_text(slide_obj, self._safe_text(item.get("label"), 14), Inches(x - 0.35), Inches(label_y), Inches(1.45), Inches(0.32), theme, 12, True, colors.primary, PP_ALIGN.CENTER)
+            self._add_text(slide_obj, self._safe_text(item.get("text"), 42), Inches(x - 0.65), Inches(body_y), Inches(2.0), Inches(0.5), theme, 10, False, colors.text_dark, PP_ALIGN.CENTER)
+
+    def _render_comparison_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.util import Inches
+
+        colors = theme.colors
+        self._add_title_header(slide_obj, slide, theme, "COMPARISON")
+        bullets = self._slide_bullets(slide, 6)
+        mid = max(1, len(bullets) // 2)
+        groups = [
+            ("Current / Pain Points", bullets[:mid], colors.primary_light),
+            ("Target / Solution", bullets[mid:], colors.bg_light),
+        ]
+        for index, (heading, items, fill) in enumerate(groups):
+            x = 0.85 + index * 6.1
+            block = self._add_card(slide_obj, Inches(x), Inches(1.85), Inches(5.55), Inches(4.65), theme, fill)
+            block.shadow.inherit = False
+            self._add_rule(slide_obj, Inches(x + 0.35), Inches(2.55), Inches(1.1), Inches(0.06), colors.accent)
+            self._add_text(slide_obj, heading, Inches(x + 0.35), Inches(2.12), Inches(4.6), Inches(0.32), theme, 17, True, colors.primary)
+            for i, item in enumerate(items[:4]):
+                self._add_text(slide_obj, f"- {item}", Inches(x + 0.38), Inches(2.75 + i * 0.72), Inches(4.75), Inches(0.35), theme, 13, False, colors.text_dark)
+
+    def _render_process_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
+
+        colors = theme.colors
+        self._add_title_header(slide_obj, slide, theme, "PROCESS")
+        steps = slide.process_steps or [{"label": f"{i + 1:02d}", "text": item} for i, item in enumerate(self._slide_bullets(slide, 6))]
+        if not steps:
+            steps = [{"label": "01", "text": "Diagram area"}]
+        self._add_rule(slide_obj, Inches(1.25), Inches(2.55), Inches(10.4), Inches(0.05), colors.divider)
+        for index, step in enumerate(steps[:6]):
+            row = index // 3
+            col = index % 3
+            x = 1.0 + col * 4.05
+            y = 2.0 + row * 2.0
+            badge = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + 0.18), Inches(y + 0.25), Inches(0.55), Inches(0.55))
+            badge.fill.solid()
+            badge.fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
+            badge.line.fill.background()
+            self._add_text(slide_obj, self._safe_text(step.get("label"), 4), Inches(x + 0.2), Inches(y + 0.38), Inches(0.5), Inches(0.2), theme, 9, True, colors.text_light, PP_ALIGN.CENTER)
+            self._add_text(slide_obj, self._safe_text(step.get("text"), 42), Inches(x + 0.9), Inches(y + 0.28), Inches(2.3), Inches(0.52), theme, 13, index == 0, colors.text_dark)
+            if index < min(len(steps), 6) - 1 and col < 2:
+                connector = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x + 3.3), Inches(y + 0.55), Inches(0.45), Inches(0.05))
+                connector.fill.solid()
+                connector.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+                connector.line.fill.background()
+
+    def _render_cards_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.util import Inches
+
+        colors = theme.colors
+        self._add_title_header(slide_obj, slide, theme, "INSIGHTS")
+        sections = slide.sections or [{"title": item[:12], "body": item} for item in self._slide_bullets(slide, 6)]
+        for index, item in enumerate(sections[:6]):
+            row = index // 3
+            col = index % 3
+            x = 0.95 + col * 4.05
+            y = 1.82 + row * 2.05 + (0.25 if col == 1 else 0)
+            self._add_text(slide_obj, f"{index + 1:02d}", Inches(x), Inches(y), Inches(0.7), Inches(0.28), theme, 12, True, colors.accent)
+            self._add_rule(slide_obj, Inches(x), Inches(y + 0.42), Inches(2.95), Inches(0.04), colors.primary_light)
+            self._add_text(slide_obj, self._safe_text(item.get("title"), 18), Inches(x), Inches(y + 0.62), Inches(2.95), Inches(0.3), theme, 15, True, colors.primary)
+            self._add_text(slide_obj, self._safe_text(item.get("body"), 64), Inches(x), Inches(y + 1.04), Inches(3.1), Inches(0.52), theme, 11, False, colors.text_dark)
+
+    def _render_closing_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches
+
+        colors = theme.colors
+        panel = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(7.1))
+        panel.fill.solid()
+        panel.fill.fore_color.rgb = self._hex_to_rgb(colors.primary)
+        panel.line.fill.background()
+        slash = slide_obj.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(8.9), Inches(-0.2), Inches(0.75), Inches(8.0))
+        slash.rotation = 14
+        slash.fill.solid()
+        slash.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+        slash.line.fill.background()
+        self._add_text(slide_obj, self._safe_text(slide.title, 34), Inches(2.0), Inches(2.0), Inches(9.3), Inches(0.8), theme, 34, True, colors.text_light, PP_ALIGN.CENTER)
+        bullets = self._slide_bullets(slide, 3)
+        text = " | ".join(bullets) if bullets else "Thanks. Q&A"
+        self._add_text(slide_obj, text, Inches(2.15), Inches(3.25), Inches(9.0), Inches(0.55), theme, 16, False, colors.text_light, PP_ALIGN.CENTER)
+        mark = slide_obj.shapes.add_shape(MSO_SHAPE.OVAL, Inches(5.95), Inches(4.35), Inches(1.35), Inches(1.35))
+        mark.fill.solid()
+        mark.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
+        mark.line.fill.background()
+        self._add_text(slide_obj, "Q&A", Inches(6.05), Inches(4.78), Inches(1.15), Inches(0.3), theme, 18, True, colors.text_light, PP_ALIGN.CENTER)
+
+    def _render_title_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        self._render_hero_layout(slide_obj, slide, theme)
+
+    def _render_two_column_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        self._render_comparison_layout(slide_obj, slide, theme)
+
+    def _render_diagram_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        self._render_process_layout(slide_obj, slide, theme)
 
 
 class MarkdownToPdfRenderer:
-    """Markdown 转 PDF（通过 Slidev）"""
+    """Convert Slidev markdown to PDF when Slidev is available."""
 
     def __init__(self, slidev_path: str = None):
         self.slidev_path = slidev_path or "slidev"
 
     async def render(self, markdown_path: str, output_path: str = None) -> Dict[str, Any]:
-        """将 Markdown 转换为 PDF"""
         if output_path is None:
             output_path = markdown_path.replace(".md", ".pdf")
-
         try:
             import subprocess
+
             result = subprocess.run(
                 [self.slidev_path, "export", markdown_path, "--format", "pdf", "--output", output_path],
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-
             if result.returncode == 0:
                 return {"success": True, "filepath": output_path}
-            else:
-                return {"success": False, "error": result.stderr}
-
+            return {"success": False, "error": result.stderr}
         except FileNotFoundError:
             return {"success": False, "error": "Slidev not found"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
 
-# 全局渲染器实例
 slidev_renderer = SlidevRenderer()
 pptx_renderer = PptxGenRenderer()
 pdf_renderer = MarkdownToPdfRenderer()
 
 
-# ============ High-level API ============
-
-async def render_deck(
-    deck: DeckSpec,
-    formats: list = None,
-) -> Dict[str, Any]:
-    """
-    渲染演示稿
-
-    Args:
-        deck: DeckSpec 对象
-        formats: 导出格式列表 ["markdown", "pptx", "pdf"]
-
-    Returns:
-        {"markdown": path, "pptx": path, "pdf": path}
-    """
+async def render_deck(deck: DeckSpec, formats: list = None) -> Dict[str, Any]:
     formats = formats or ["pptx"]
     results = {}
-
     if "markdown" in formats:
         md_path = slidev_renderer.render_to_file(deck)
         results["markdown"] = md_path
-
     if "pptx" in formats:
         pptx_result = await pptx_renderer.render(deck)
         if pptx_result.get("success"):
             results["pptx"] = pptx_result["filepath"]
-
     if "pdf" in formats:
-        # 先生成 markdown，再转 pdf
         md_path = slidev_renderer.render_to_file(deck)
         pdf_result = await pdf_renderer.render(md_path)
         if pdf_result.get("success"):
             results["pdf"] = pdf_result["filepath"]
-
     return results

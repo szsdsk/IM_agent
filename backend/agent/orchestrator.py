@@ -815,13 +815,15 @@ class AgentOrchestrator:
                     if not result.get("success"):
                         raise RuntimeError(result.get("error") or "Failed to regenerate slides")
                     file_path = result.get("download_url") or result.get("file_path")
+                    final_revised_spec = result.get("deck_spec") or revised_spec
                 else:
                     revised_spec = self._build_deck_spec(title, base_slides, slides, metadata)
                     file_path = base_slides.get("file_path")
+                    final_revised_spec = revised_spec
 
                 if wants_rehearsal:
-                    rehearsal = await generate_rehearsal(revised_spec)
-                    qa = await generate_qa(revised_spec, rehearsal)
+                    rehearsal = await generate_rehearsal(final_revised_spec)
+                    qa = await generate_qa(final_revised_spec, rehearsal)
                     qa_items = qa.get("items", [])
                 else:
                     # 普通单页内容微调不重算演练稿和 Q&A，避免一次小改触发多轮 LLM。
@@ -829,16 +831,17 @@ class AgentOrchestrator:
                     qa_items = base_slides.get("qa", [])
                 state["slides_content"] = {
                     "slide_id": result.get("slide_id") if should_update_slides else base_slides.get("slide_id"),
-                    "title": revised_spec.get("title"),
-                    "slides": revised_spec.get("slides", []),
+                    "title": final_revised_spec.get("title"),
+                    "slides": final_revised_spec.get("slides", []),
                     "file_path": file_path,
-                    "theme": revised_spec.get("theme"),
-                    "audience": revised_spec.get("audience"),
-                    "duration_minutes": revised_spec.get("duration_minutes"),
-                    "metadata": revised_spec.get("metadata", {}),
+                    "theme": final_revised_spec.get("theme"),
+                    "visual_profile": final_revised_spec.get("visual_profile") or (final_revised_spec.get("metadata", {}) or {}).get("visual_profile"),
+                    "audience": final_revised_spec.get("audience"),
+                    "duration_minutes": final_revised_spec.get("duration_minutes"),
+                    "metadata": final_revised_spec.get("metadata", {}),
                     "rehearsal": rehearsal,
                     "qa": qa_items,
-                    "feedback_history": revised_spec.get("metadata", {}).get("feedback_history", base_slides.get("feedback_history", [])),
+                    "feedback_history": final_revised_spec.get("metadata", {}).get("feedback_history", base_slides.get("feedback_history", [])),
                 }
             elif isinstance(base_slides, dict) and base_slides:
                 state["slides_content"] = {

@@ -50,6 +50,13 @@ class DeckSlide(BaseModel):
     layout: str = "content"
     content: Any = ""
     bullets: List[str] = Field(default_factory=list)
+    visual_profile: Optional[str] = None
+    layout_variant: Optional[str] = None
+    highlight_metrics: List[Dict[str, str]] = Field(default_factory=list)
+    sections: List[Dict[str, str]] = Field(default_factory=list)
+    chart: Optional[Dict[str, Any]] = None
+    timeline: List[Dict[str, str]] = Field(default_factory=list)
+    process_steps: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class DeckSpecModel(BaseModel):
@@ -57,6 +64,7 @@ class DeckSpecModel(BaseModel):
     audience: str = "管理层"
     duration_minutes: int = 5
     theme: str = "business_blue"
+    visual_profile: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     slides: List[DeckSlide] = Field(default_factory=list)
 
@@ -591,12 +599,19 @@ SYSTEM_PROMPTS = {
 要求：
 - 每页有明确标题和内容
 - 控制信息密度，适合演讲展示
-- 适当使用图表和可视化建议
+- 给每页选择明确页面意图：结论页、指标页、流程页、对比页、时间线页、Q&A 页
+- layout 优先从 hero、metrics、timeline、comparison、process、cards、closing 中选择；必要时可用 content、two_column、diagram
+- 指标页把关键数字放入 highlight_metrics，时间线页放入 timeline，流程页放入 process_steps，对比/卡片页放入 sections
+- 适当使用图表和可视化建议，但不要输出 CSS、坐标或外部图片 URL
 - 输出结构化演示稿信息
-- theme 字段从 business_blue / tech_dark / minimal 中选择最合适的主题
+- theme 字段从 business_blue / tech_dark / minimal / emerald / slate / sunset / entertainment 中选择最合适的主题
   - business_blue: 商务蓝色，适合正式汇报
   - tech_dark: 科技深色，适合技术分享
-  - minimal: 极简风格，适合简洁报告""",
+  - minimal: 极简风格，适合简洁报告
+  - emerald: 适合方案提案和增长主题
+  - slate: 适合复盘、风险和治理主题
+  - sunset: 适合营销、活动和阶段推进
+  - entertainment: 适合游戏、文娱、二次元主题""",
 
     "summarizer": """你是一个会议和讨论总结助手。分析 IM 对话上下文，提取核心话题、观点、共识、待办和决策。""",
 

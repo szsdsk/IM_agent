@@ -562,25 +562,35 @@ async def generate_slides(state: AgentState) -> AgentState:
         )
 
         if result.get("success"):
+            final_deck_spec = result.get("deck_spec") or deck_spec
+            final_metadata = dict(final_deck_spec.get("metadata", metadata) or {})
+            final_metadata.setdefault("feedback_history", [])
+            final_metadata.setdefault("versions", [])
+            final_slides = [
+                _normalize_slide_for_frontend(slide, index)
+                for index, slide in enumerate(final_deck_spec.get("slides", raw_slides))
+            ]
             state["slides_content"] = {
                 "slide_id": result.get("slide_id"),
-                "title": deck_spec.get("title"),
-                "slides": slides,
+                "title": final_deck_spec.get("title"),
+                "slides": final_slides,
                 "file_path": result.get("download_url") or result.get("file_path"),
-                "theme": deck_spec.get("theme"),
-                "audience": deck_spec.get("audience"),
-                "duration_minutes": deck_spec.get("duration_minutes"),
-                "metadata": metadata,
+                "theme": final_deck_spec.get("theme"),
+                "visual_profile": final_deck_spec.get("visual_profile") or final_metadata.get("visual_profile"),
+                "audience": final_deck_spec.get("audience"),
+                "duration_minutes": final_deck_spec.get("duration_minutes"),
+                "metadata": final_metadata,
                 "rehearsal": rehearsal,
                 "qa": qa.get("items", []),
-                "feedback_history": [],
+                "feedback_history": final_metadata.get("feedback_history", []),
             }
+            state["deck_spec"] = final_deck_spec
             state["slide_id"] = result.get("slide_id")
 
-            slides_count = len(slides)
+            slides_count = len(final_slides)
             slide_list = "\n".join(
                 f"- 第 {slide.get('index', index) + 1} 页: {slide.get('title', '未命名')}"
-                for index, slide in enumerate(slides[:5])
+                for index, slide in enumerate(final_slides[:5])
             )
             _append_message(
                 state,

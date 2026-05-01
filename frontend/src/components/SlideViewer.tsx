@@ -1,18 +1,18 @@
 import { useState } from 'react'
 import { useSessionStore } from '../store/useSessionStore'
-import type { FeedbackHistoryItem, QAItem, RehearsalSlide, SlideDeckPayload } from '../types'
+import type {
+  FeedbackHistoryItem,
+  QAItem,
+  RehearsalSlide,
+  SlideDeckPayload,
+  VisualSlideItem,
+} from '../types'
 
 interface SlideViewerProps {
   className?: string
 }
 
-interface SlideItem {
-  title?: string
-  content?: unknown
-  bullets?: string[]
-}
-
-function getSlideText(slide: SlideItem): string {
+function getSlideText(slide: VisualSlideItem): string {
   // 兼容模型返回的字符串、数组、对象和 bullets，统一转成可预览文本。
   if (typeof slide.content === 'string') return slide.content
   if (Array.isArray(slide.content)) return slide.content.map(String).join('\n')
@@ -35,6 +35,19 @@ function getDownloadHref(filePath: string): string {
   return filePath
 }
 
+function getDeckTheme(payload: SlideDeckPayload): string | null {
+  return payload.theme || (payload.metadata?.theme as string | undefined) || null
+}
+
+function getDeckProfile(payload: SlideDeckPayload): string | null {
+  return (
+    payload.visual_profile ||
+    (payload.metadata?.visual_profile as string | undefined) ||
+    (payload.metadata?.template_profile as string | undefined) ||
+    null
+  )
+}
+
 export default function SlideViewer({ className = '' }: SlideViewerProps) {
   const { slides, status } = useSessionStore()
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -51,14 +64,17 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
   }
 
   const deckPayload: SlideDeckPayload = Array.isArray(slides.slides_json)
-    ? { slides: slides.slides_json as SlideItem[] }
+    ? { slides: slides.slides_json as VisualSlideItem[] }
     : ((slides.slides_json || {}) as SlideDeckPayload)
-  const slidesData = (deckPayload.slides || []) as SlideItem[]
-  const selectedSlide = slidesData[Math.min(selectedIndex, Math.max(slidesData.length - 1, 0))]
+  const slidesData = deckPayload.slides || []
+  const safeSelectedIndex = Math.min(selectedIndex, Math.max(slidesData.length - 1, 0))
+  const selectedSlide = slidesData[safeSelectedIndex]
   const rehearsalSlides = deckPayload.rehearsal?.slides || []
-  const selectedRehearsal = rehearsalSlides.find((item: RehearsalSlide) => item.slide_index === selectedIndex)
-  const selectedQa = (deckPayload.qa || []).filter((item: QAItem) => item.slide_index === selectedIndex || item.slide_index == null)
+  const selectedRehearsal = rehearsalSlides.find((item: RehearsalSlide) => item.slide_index === safeSelectedIndex)
+  const selectedQa = (deckPayload.qa || []).filter((item: QAItem) => item.slide_index === safeSelectedIndex || item.slide_index == null)
   const feedbackHistory = deckPayload.feedback_history || deckPayload.metadata?.feedback_history || []
+  const deckTheme = getDeckTheme(deckPayload)
+  const deckProfile = getDeckProfile(deckPayload)
 
   return (
     <div className={`bg-white border rounded-lg shadow-sm overflow-hidden ${className}`}>
@@ -66,10 +82,19 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
         <div>
           <h3 className="font-medium text-gray-800">PPT 预览</h3>
           <p className="text-xs text-gray-500 mt-1">共 {slidesData.length} 页</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {deckTheme && <span className="rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700">主题 {deckTheme}</span>}
+            {deckProfile && <span className="rounded-full bg-emerald-50 px-2 py-1 text-xs text-emerald-700">风格 {deckProfile}</span>}
+            {deckPayload.rehearsal?.total_duration_minutes && (
+              <span className="rounded-full bg-amber-50 px-2 py-1 text-xs text-amber-700">
+                演练 {deckPayload.rehearsal.total_duration_minutes} 分钟
+              </span>
+            )}
+          </div>
         </div>
         {slides.file_path && (
           <div className="flex items-center gap-2">
-            {/* 网页端只负责本地交付，飞书交付统一走 bot 流程。 */}
+            {/* 网页端只负责本地下载，飞书交付仍走 Bot 流程。 */}
             <a
               href={getDownloadHref(slides.file_path)}
               target="_blank"
@@ -89,13 +114,20 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
               {slidesData.map((slide, index) => (
                 <button
                   type="button"
-                  key={index}
+                  key={`${slide.title || 'slide'}-${index}`}
                   onClick={() => setSelectedIndex(index)}
                   className={`aspect-[4/3] rounded-lg border p-4 text-left transition-shadow hover:shadow-md ${
-                    selectedIndex === index ? 'border-blue-500 bg-blue-50' : 'bg-gray-50'
+                    safeSelectedIndex === index ? 'border-blue-500 bg-blue-50' : 'bg-gray-50'
                   }`}
                 >
-                  <div className="text-xs text-gray-500 mb-2">第 {index + 1} 页</div>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-xs text-gray-500">第 {index + 1} 页</span>
+                    {slide.layout && (
+                      <span className="rounded-full bg-white px-2 py-0.5 text-[11px] text-gray-500 shadow-sm">
+                        {slide.layout}
+                      </span>
+                    )}
+                  </div>
                   {slide.title && <h4 className="font-medium text-gray-800 mb-2">{slide.title}</h4>}
                   {getSlideText(slide) && (
                     <p className="text-sm text-gray-600 whitespace-pre-wrap line-clamp-6">{getSlideText(slide)}</p>
@@ -106,12 +138,29 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
 
             {selectedSlide && (
               <div className="rounded-lg border bg-white p-4">
-                <div className="mb-3 flex items-center justify-between">
+                <div className="mb-3 flex items-start justify-between gap-3">
                   <div>
                     <p className="text-xs text-gray-500">单页详情</p>
                     <h4 className="font-semibold text-gray-800">
-                      第 {selectedIndex + 1} 页：{selectedSlide.title || '未命名'}
+                      第 {safeSelectedIndex + 1} 页：{selectedSlide.title || '未命名'}
                     </h4>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {selectedSlide.layout && (
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                          Layout {selectedSlide.layout}
+                        </span>
+                      )}
+                      {selectedSlide.layout_variant && (
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                          Variant {selectedSlide.layout_variant}
+                        </span>
+                      )}
+                      {selectedSlide.visual_profile && (
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                          Profile {selectedSlide.visual_profile}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   {selectedRehearsal?.duration_seconds && (
                     <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-600">
@@ -163,7 +212,7 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
           </div>
         ) : (
           <div className="text-center text-gray-400 py-12">
-            {/* 任务完成但页面为空时，多半是后端没有拿到上一版 slides，避免误导成仍在生成。 */}
+            {/* 任务完成但页面为空时，不再误导成仍在生成。 */}
             {status === 'completed' ? '未获取到 PPT 页面内容，请重新生成或刷新后重试。' : 'PPT 正在生成中...'}
           </div>
         )}

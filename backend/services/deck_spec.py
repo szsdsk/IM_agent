@@ -2,7 +2,7 @@
 DeckSpec - PPT 中间格式定义
 统一的演示稿描述格式，支持 Slidev 和 PptxGenJS 两种渲染器
 """
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 import json
@@ -61,11 +61,52 @@ class ThemeConfig:
         ))
 
     @classmethod
+    def emerald(cls) -> "ThemeConfig":
+        return cls(name="emerald", colors=ThemeColors(
+            primary="#047857", primary_light="#D1FAE5",
+            secondary="#065F46", accent="#F97316",
+            bg_white="#F8FAFC", bg_light="#ECFDF5",
+            divider="#A7F3D0",
+        ))
+
+    @classmethod
+    def slate(cls) -> "ThemeConfig":
+        return cls(name="slate", colors=ThemeColors(
+            primary="#334155", primary_light="#E2E8F0",
+            secondary="#475569", accent="#EAB308",
+            text_dark="#0F172A", bg_white="#F8FAFC",
+            bg_light="#F1F5F9", divider="#CBD5E1",
+        ))
+
+    @classmethod
+    def sunset(cls) -> "ThemeConfig":
+        return cls(name="sunset", colors=ThemeColors(
+            primary="#C2410C", primary_light="#FFEDD5",
+            secondary="#7C2D12", accent="#2563EB",
+            bg_white="#FFF7ED", bg_light="#FFEDD5",
+            divider="#FDBA74",
+        ))
+
+    @classmethod
+    def entertainment(cls) -> "ThemeConfig":
+        return cls(name="entertainment", colors=ThemeColors(
+            primary="#7C3AED", primary_light="#EDE9FE",
+            secondary="#0F172A", accent="#F59E0B",
+            text_dark="#111827", bg_white="#FAF5FF",
+            bg_light="#F3E8FF", bg_dark="#312E81",
+            divider="#DDD6FE",
+        ))
+
+    @classmethod
     def get_theme(cls, name: str) -> "ThemeConfig":
         themes = {
             "business_blue": cls.business_blue,
             "tech_dark": cls.tech_dark,
             "minimal": cls.minimal,
+            "emerald": cls.emerald,
+            "slate": cls.slate,
+            "sunset": cls.sunset,
+            "entertainment": cls.entertainment,
         }
         return themes.get(name, cls.business_blue)()
 
@@ -78,13 +119,20 @@ class SlideSpec:
     """单页幻灯片定义"""
     index: int
     title: str
-    layout: str = "content"  # title, content, two_column, diagram, image, blank
-    content: Optional[Dict] = None
+    layout: str = "content"
+    content: Optional[Any] = None
     speaker_notes: str = ""
     duration_seconds: int = 60
     diagram_ref: Optional[str] = None  # e.g., "canvas:workflow-001"
     bullets: List[str] = field(default_factory=list)
     image_ref: Optional[str] = None
+    visual_profile: Optional[str] = None
+    layout_variant: Optional[str] = None
+    highlight_metrics: List[Dict[str, str]] = field(default_factory=list)
+    sections: List[Dict[str, str]] = field(default_factory=list)
+    chart: Optional[Dict[str, Any]] = None
+    timeline: List[Dict[str, str]] = field(default_factory=list)
+    process_steps: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -101,6 +149,13 @@ class SlideSpec:
             diagram_ref=data.get("diagram_ref"),
             bullets=data.get("bullets", []),
             image_ref=data.get("image_ref"),
+            visual_profile=data.get("visual_profile"),
+            layout_variant=data.get("layout_variant"),
+            highlight_metrics=data.get("highlight_metrics", []),
+            sections=data.get("sections", []),
+            chart=data.get("chart"),
+            timeline=data.get("timeline", []),
+            process_steps=data.get("process_steps", []),
         )
 
 
@@ -111,6 +166,7 @@ class DeckSpec:
     audience: str = "管理层"
     duration_minutes: int = 5
     theme: str = "business_blue"
+    visual_profile: Optional[str] = None
     slides: List[SlideSpec] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -141,6 +197,7 @@ class DeckSpec:
             "audience": self.audience,
             "duration_minutes": self.duration_minutes,
             "theme": self.theme,
+            "visual_profile": self.visual_profile,
             "slides": [s.to_dict() for s in self.slides],
             "metadata": self.metadata,
             "created_at": self.created_at,
@@ -156,6 +213,7 @@ class DeckSpec:
             audience=data.get("audience", "管理层"),
             duration_minutes=data.get("duration_minutes", 5),
             theme=data.get("theme", "business_blue"),
+            visual_profile=data.get("visual_profile"),
             slides=[SlideSpec.from_dict(s) for s in data.get("slides", [])],
             metadata=data.get("metadata", {}),
             created_at=data.get("created_at", datetime.utcnow().isoformat()),
@@ -301,7 +359,11 @@ def validate_deck_spec(deck: DeckSpec) -> List[str]:
         if not slide.title:
             errors.append(f"Slide {i} missing title")
 
-        valid_layouts = ["title", "content", "two_column", "diagram", "image", "blank"]
+        valid_layouts = [
+            "title", "content", "two_column", "diagram", "image", "blank",
+            "hero", "section_divider", "metrics", "timeline", "comparison",
+            "process", "cards", "closing",
+        ]
         if slide.layout not in valid_layouts:
             errors.append(f"Slide {i} has invalid layout: {slide.layout}")
 

@@ -175,6 +175,8 @@ class PPTTool(BaseTool):
                     )
 
             self._apply_template_profile(deck)
+            from backend.services.visual_deck import normalize_visual_deck
+            deck = normalize_visual_deck(deck)
 
             renderer = PptxGenRenderer(self._output_dir)
             result = await renderer.render(deck, filename=f"{task_id}.pptx")
@@ -186,6 +188,7 @@ class PPTTool(BaseTool):
                     "task_id": task_id,
                     "title": deck.title,
                     "slides_count": len(deck.slides),
+                    "deck_spec": deck.to_dict(),
                     "file_path": result["filepath"],
                     "download_url": self._download_url(result["filepath"]),
                 }
@@ -207,6 +210,8 @@ class PPTTool(BaseTool):
             from backend.services.deck_spec import DeckSpec
 
             deck = DeckSpec.from_dict(deck_spec)
+            from backend.services.visual_deck import normalize_visual_deck
+            deck = normalize_visual_deck(deck)
             renderer = PptxGenRenderer(self._output_dir)
             result = await renderer.render(deck, filename=f"{task_id}.pptx")
 
@@ -217,6 +222,7 @@ class PPTTool(BaseTool):
                     "task_id": task_id,
                     "title": deck.title,
                     "slides_count": len(deck.slides),
+                    "deck_spec": deck.to_dict(),
                     "file_path": result["filepath"],
                     "download_url": self._download_url(result["filepath"]),
                 }

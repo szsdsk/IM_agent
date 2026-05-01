@@ -51,11 +51,26 @@ export interface Slide {
 
 export interface SlideDeckPayload {
   title?: string
-  slides?: Record<string, any>[]
+  theme?: string
+  visual_profile?: string | null
+  slides?: VisualSlideItem[]
   metadata?: Record<string, any>
   rehearsal?: RehearsalPlan | null
   qa?: QAItem[]
   feedback_history?: FeedbackHistoryItem[]
+}
+
+export interface VisualSlideItem {
+  title?: string
+  layout?: string
+  layout_variant?: string | null
+  visual_profile?: string | null
+  content?: unknown
+  bullets?: string[]
+  highlight_metrics?: Array<Record<string, string>>
+  sections?: Array<Record<string, string>>
+  timeline?: Array<Record<string, string>>
+  process_steps?: Array<Record<string, string>>
 }
 
 export interface RehearsalPlan {
