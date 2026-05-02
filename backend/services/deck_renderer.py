@@ -123,6 +123,8 @@ class PptxGenRenderer:
             self._render_process_layout(slide_obj, slide, theme)
         elif slide.layout == "cards":
             self._render_cards_layout(slide_obj, slide, theme)
+        elif slide.layout == "chart":
+            self._render_chart_layout(slide_obj, slide, theme)
         elif slide.layout == "closing":
             self._render_closing_layout(slide_obj, slide, theme)
         else:
@@ -482,6 +484,101 @@ class PptxGenRenderer:
         mark.fill.fore_color.rgb = self._hex_to_rgb(colors.accent)
         mark.line.fill.background()
         self._add_text(slide_obj, "Q&A", Inches(6.05), Inches(4.78), Inches(1.15), Inches(0.3), theme, 18, True, colors.text_light, PP_ALIGN.CENTER)
+
+    def _render_chart_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches, Pt
+        from pptx.chart.data import CategoryChartData
+
+        colors = theme.colors
+        chart_data = slide.chart
+
+        if not chart_data or not chart_data.get("series"):
+            self._render_content_layout(slide_obj, slide, theme)
+            return
+
+        self._add_title_header(slide_obj, slide, theme, "CHART")
+
+        chart_type_str = chart_data.get("type", "bar")
+        xl_chart_type = self._chart_type_to_xl(chart_type_str)
+        categories = chart_data.get("categories", [])
+        series_list = chart_data.get("series", [])
+
+        category_data = CategoryChartData()
+        category_data.categories = categories
+        for s in series_list:
+            values = [float(v) for v in s.get("values", [])]
+            category_data.add_series(s.get("name", ""), values)
+
+        chart_frame = slide_obj.shapes.add_chart(
+            xl_chart_type,
+            Inches(0.75), Inches(1.65),
+            Inches(11.8), Inches(5.0),
+            category_data,
+        )
+
+        chart = chart_frame.chart
+        chart.has_legend = len(series_list) > 1
+        if chart.has_legend:
+            chart.legend.include_in_layout = False
+            chart.legend.font.size = Pt(10)
+            chart.legend.font.name = theme.font_body
+
+        theme_palette = [
+            colors.primary, colors.accent, colors.secondary,
+            colors.primary_light, colors.divider,
+        ]
+        plot = chart.plots[0]
+
+        if chart_type_str == "pie":
+            plot.has_data_labels = True
+            data_labels = plot.data_labels
+            data_labels.font.size = Pt(9)
+            data_labels.font.name = theme.font_body
+            data_labels.font.color.rgb = self._hex_to_rgb(colors.text_dark)
+            data_labels.number_format = '0%'
+            data_labels.show_percentage = True
+            data_labels.show_category_name = True
+            data_labels.show_value = False
+            # Color each pie slice
+            series_format = plot.series[0]
+            for i in range(len(categories)):
+                point = series_format.points[i]
+                point.format.fill.solid()
+                point.format.fill.fore_color.rgb = self._hex_to_rgb(theme_palette[i % len(theme_palette)])
+        else:
+            for i, series in enumerate(plot.series):
+                hex_color = theme_palette[i % len(theme_palette)]
+                series.format.fill.solid()
+                series.format.fill.fore_color.rgb = self._hex_to_rgb(hex_color)
+
+        if hasattr(plot, 'value_axis') and chart_type_str != "pie":
+            value_axis = plot.value_axis
+            value_axis.has_title = False
+            value_axis.major_gridlines.format.line.color.rgb = self._hex_to_rgb(colors.divider)
+            value_axis.format.line.color.rgb = self._hex_to_rgb(colors.divider)
+            value_axis.tick_labels.font.size = Pt(9)
+            value_axis.tick_labels.font.name = theme.font_body
+            value_axis.tick_labels.font.color.rgb = self._hex_to_rgb(colors.text_muted)
+
+        if hasattr(plot, 'category_axis') and chart_type_str != "pie":
+            cat_axis = plot.category_axis
+            cat_axis.has_title = False
+            cat_axis.format.line.color.rgb = self._hex_to_rgb(colors.divider)
+            cat_axis.tick_labels.font.size = Pt(9)
+            cat_axis.tick_labels.font.name = theme.font_body
+            cat_axis.tick_labels.font.color.rgb = self._hex_to_rgb(colors.text_muted)
+
+    @staticmethod
+    def _chart_type_to_xl(chart_type: str):
+        from pptx.enum.chart import XL_CHART_TYPE
+        mapping = {
+            "bar": XL_CHART_TYPE.COLUMN_CLUSTERED,
+            "horizontal_bar": XL_CHART_TYPE.BAR_CLUSTERED,
+            "line": XL_CHART_TYPE.LINE_MARKERS,
+            "pie": XL_CHART_TYPE.PIE,
+        }
+        return mapping.get(chart_type, XL_CHART_TYPE.COLUMN_CLUSTERED)
 
     def _render_title_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
         self._render_hero_layout(slide_obj, slide, theme)

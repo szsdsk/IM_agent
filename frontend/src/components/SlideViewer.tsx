@@ -1,4 +1,8 @@
 import { useState } from 'react'
+import {
+  BarChart, Bar, PieChart, Pie, Cell, LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts'
 import { useSessionStore } from '../store/useSessionStore'
 import type {
   FeedbackHistoryItem,
@@ -45,6 +49,76 @@ function getDeckProfile(payload: SlideDeckPayload): string | null {
     (payload.metadata?.visual_profile as string | undefined) ||
     (payload.metadata?.template_profile as string | undefined) ||
     null
+  )
+}
+
+const CHART_COLORS = ['#1A56DB', '#F59E0B', '#374151', '#DBEAFE', '#6B7280']
+
+function ChartPreview({ chart }: { chart: NonNullable<VisualSlideItem['chart']> }) {
+  const { type, categories, series } = chart
+  const data = categories.map((cat, i) => {
+    const row: Record<string, string | number> = { name: cat }
+    series.forEach((s) => { row[s.name] = s.values[i] ?? 0 })
+    return row
+  })
+
+  if (type === 'pie' && series[0]) {
+    const pieData = categories.map((cat, i) => ({ name: cat, value: series[0].values[i] ?? 0 }))
+    return (
+      <ResponsiveContainer width="100%" height={200}>
+        <PieChart>
+          <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
+            {pieData.map((_, i) => (
+              <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip />
+          <Legend />
+        </PieChart>
+      </ResponsiveContainer>
+    )
+  }
+
+  if (type === 'line') {
+    return (
+      <ResponsiveContainer width="100%" height={200}>
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+          <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+          <YAxis tick={{ fontSize: 11 }} />
+          <Tooltip />
+          <Legend />
+          {series.map((s, i) => (
+            <Line key={s.name} type="monotone" dataKey={s.name} stroke={CHART_COLORS[i % CHART_COLORS.length]} strokeWidth={2} dot />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+    )
+  }
+
+  // Default: bar (also handles horizontal_bar in preview)
+  return (
+    <ResponsiveContainer width="100%" height={200}>
+      <BarChart data={data} layout={type === 'horizontal_bar' ? 'vertical' : 'horizontal'}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+        {type === 'horizontal_bar' ? (
+          <>
+            <XAxis type="number" tick={{ fontSize: 11 }} />
+            <YAxis dataKey="name" type="category" tick={{ fontSize: 11 }} width={60} />
+          </>
+        ) : (
+          <>
+            <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+            <YAxis tick={{ fontSize: 11 }} />
+          </>
+        )}
+        <Tooltip />
+        <Legend />
+        {series.map((s, i) => (
+          <Bar key={s.name} dataKey={s.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+        ))}
+      </BarChart>
+    </ResponsiveContainer>
   )
 }
 
@@ -129,8 +203,12 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
                     )}
                   </div>
                   {slide.title && <h4 className="font-medium text-gray-800 mb-2">{slide.title}</h4>}
-                  {getSlideText(slide) && (
-                    <p className="text-sm text-gray-600 whitespace-pre-wrap line-clamp-6">{getSlideText(slide)}</p>
+                  {slide.layout === 'chart' && slide.chart ? (
+                    <ChartPreview chart={slide.chart} />
+                  ) : (
+                    getSlideText(slide) && (
+                      <p className="text-sm text-gray-600 whitespace-pre-wrap line-clamp-6">{getSlideText(slide)}</p>
+                    )
                   )}
                 </button>
               ))}
@@ -173,6 +251,13 @@ export default function SlideViewer({ className = '' }: SlideViewerProps) {
                   <div className="mb-3 rounded-md bg-amber-50 p-3">
                     <p className="mb-1 text-xs font-medium text-amber-700">演练讲稿</p>
                     <p className="whitespace-pre-wrap text-sm text-gray-700">{selectedRehearsal.speaker_notes}</p>
+                  </div>
+                )}
+
+                {selectedSlide.layout === 'chart' && selectedSlide.chart && (
+                  <div className="mb-3 rounded-md bg-white border p-3">
+                    <p className="mb-2 text-xs font-medium text-gray-600">图表预览</p>
+                    <ChartPreview chart={selectedSlide.chart} />
                   </div>
                 )}
 

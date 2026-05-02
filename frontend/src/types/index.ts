@@ -71,6 +71,15 @@ export interface VisualSlideItem {
   sections?: Array<Record<string, string>>
   timeline?: Array<Record<string, string>>
   process_steps?: Array<Record<string, string>>
+  chart?: {
+    type: 'bar' | 'pie' | 'line' | 'horizontal_bar'
+    title?: string
+    categories: string[]
+    series: Array<{
+      name: string
+      values: number[]
+    }>
+  }
 }
 
 export interface RehearsalPlan {
