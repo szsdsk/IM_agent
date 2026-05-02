@@ -115,6 +115,7 @@ export interface Health {
   status: string
   timestamp: string
   version: string
+  local_ip?: string | null
 }
 
 export interface Message {

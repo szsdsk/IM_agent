@@ -1,13 +1,14 @@
 import json
 import logging
 import re
+import socket
 import uuid
 from difflib import unified_diff
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -245,6 +246,27 @@ def _event_to_message(event: Event, session_id: str) -> Optional[MessageResponse
 def _task_delivery_confirmed(task: Task) -> bool:
     """判断任务是否已经确认交付，确认后不再允许继续修改。"""
     return isinstance(task.result_json, dict) and bool(task.result_json.get("delivery_confirmed"))
+
+
+def _get_local_lan_ip() -> Optional[str]:
+    """获取本机局域网 IP，用于前端生成手机可访问的同步链接。"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # UDP connect 不会真正发送数据，只用于让系统选择默认出网网卡。
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        return None
+    return None
 
 
 async def _build_session_state(db: AsyncSession, session_id: str) -> Dict[str, Any]:
@@ -836,11 +858,12 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check():
+async def health_check(request: Request):
     # 网页端只需要知道后端是否存活，飞书同步状态不再作为网页能力暴露。
     return HealthResponse(
         status="healthy",
         timestamp=datetime.utcnow(),
+        local_ip=_get_local_lan_ip(),
     )
 
 

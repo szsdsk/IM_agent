@@ -65,6 +65,16 @@ export default function App() {
     if (!sessionId) return
     const url = new URL(window.location.href)
     url.searchParams.set('session_id', sessionId)
+    if (['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(url.hostname)) {
+      try {
+        const health = await api.healthCheck()
+        if (health.local_ip) {
+          url.hostname = health.local_ip
+        }
+      } catch {
+        // 获取局域网 IP 失败时保留 localhost 链接，避免影响复制功能本身。
+      }
+    }
     await navigator.clipboard.writeText(url.toString())
     setShareCopied(true)
     window.setTimeout(() => setShareCopied(false), 1500)

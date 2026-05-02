@@ -104,6 +104,7 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: datetime
     version: str = "1.0.0"
+    local_ip: Optional[str] = None
 
 
 class VoiceTranscriptionResponse(BaseModel):
