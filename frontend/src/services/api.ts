@@ -1,4 +1,4 @@
-import type { Session, Task, Document, DocumentHistoryItem, Slide, Message, Health, PresentationScene } from '../types'
+import type { Session, SessionSnapshot, Task, Document, DocumentHistoryItem, Slide, Message, Health, PresentationScene } from '../types'
 
 const API_BASE = '/api'
 
@@ -12,7 +12,8 @@ async function fetchAPI<T>(url: string, options: RequestInit = {}): Promise<T> {
 
   const response = await fetch(`${API_BASE}${url}`, defaultOptions)
   if (!response.ok) {
-    throw new Error(`API Error: ${response.statusText}`)
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail || `API Error: ${response.statusText}`)
   }
   return response.json() as Promise<T>
 }
@@ -33,12 +34,18 @@ export const api = {
     return fetchAPI<Message[]>(`/sessions/${sessionId}/messages`)
   },
 
+  async getSessionState(sessionId: string): Promise<SessionSnapshot> {
+    return fetchAPI<SessionSnapshot>(`/sessions/${sessionId}/state`)
+  },
+
   async sendMessage(
     sessionId: string,
     content: string,
     userId?: string,
     presentationScene?: PresentationScene,
-    feedbackTaskId?: string
+    feedbackTaskId?: string,
+    clientId?: string,
+    deviceType?: string
   ): Promise<Task> {
     return fetchAPI<Task>(`/sessions/${sessionId}/messages`, {
       method: 'POST',
@@ -47,6 +54,8 @@ export const api = {
         user_id: userId,
         presentation_scene: presentationScene,
         feedback_task_id: feedbackTaskId,
+        client_id: clientId,
+        device_type: deviceType,
       }),
     })
   },

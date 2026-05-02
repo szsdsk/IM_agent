@@ -11,6 +11,7 @@ import { useSessionStore } from './store/useSessionStore'
 
 export default function App() {
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null)
+  const [shareCopied, setShareCopied] = useState(false)
   const sessionId = useSessionStore((state) => state.sessionId)
   const setSessionId = useSessionStore((state) => state.setSessionId)
 
@@ -38,6 +39,12 @@ export default function App() {
           wsService.connect(sessionId)
           return
         }
+        const urlSessionId = new URLSearchParams(window.location.search).get('session_id')
+        if (urlSessionId) {
+          setSessionId(urlSessionId)
+          wsService.connect(urlSessionId)
+          return
+        }
         const session = await api.createSession()
         if (cancelled) return
         setSessionId(session.id)
@@ -54,6 +61,25 @@ export default function App() {
     }
   }, [sessionId, setSessionId])
 
+  const copySyncLink = async () => {
+    if (!sessionId) return
+    const url = new URL(window.location.href)
+    url.searchParams.set('session_id', sessionId)
+    if (['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(url.hostname)) {
+      try {
+        const health = await api.healthCheck()
+        if (health.local_ip) {
+          url.hostname = health.local_ip
+        }
+      } catch {
+        // 获取局域网 IP 失败时保留 localhost 链接，避免影响复制功能本身。
+      }
+    }
+    await navigator.clipboard.writeText(url.toString())
+    setShareCopied(true)
+    window.setTimeout(() => setShareCopied(false), 1500)
+  }
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b shadow-sm">
@@ -65,6 +91,14 @@ export default function App() {
             <h1 className="text-xl font-semibold text-gray-800">Agent-Pilot 智能办公助手</h1>
           </div>
           <div className="flex items-center gap-3">
+            {sessionId && (
+              <button
+                onClick={copySyncLink}
+                className="rounded-md border border-blue-200 px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-50"
+              >
+                {shareCopied ? '已复制同步链接' : '复制同步链接'}
+              </button>
+            )}
             <span
               className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs ${
                 backendHealthy === null

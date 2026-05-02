@@ -1,10 +1,30 @@
 import { create } from 'zustand'
-import type { CanvasArtifact, Task, Document, Slide, Message, SessionStatus } from '../types'
+import type { CanvasArtifact, Task, Document, Slide, Message, SessionSnapshot, SessionStatus } from '../types'
 
 const STORAGE_KEY = 'agent-pilot-session-state'
+const CLIENT_ID_KEY = 'agent-pilot-client-id'
+
+function createClientId(): string {
+  if (typeof window === 'undefined') return `server-${Date.now()}`
+  const existing = window.localStorage.getItem(CLIENT_ID_KEY)
+  if (existing) return existing
+  const next =
+    typeof window.crypto?.randomUUID === 'function'
+      ? window.crypto.randomUUID()
+      : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  window.localStorage.setItem(CLIENT_ID_KEY, next)
+  return next
+}
+
+function detectDeviceType(): 'desktop' | 'mobile' {
+  if (typeof window === 'undefined') return 'desktop'
+  return window.matchMedia('(max-width: 768px)').matches ? 'mobile' : 'desktop'
+}
 
 interface SessionState {
   sessionId: string | null
+  clientId: string
+  deviceType: 'desktop' | 'mobile'
   task: Task | null
   status: SessionStatus
   currentStep: string
@@ -13,9 +33,12 @@ interface SessionState {
   slides: Slide | null
   canvas: CanvasArtifact | null
   messages: Message[]
+  seenEventIds: string[]
   wsConnected: boolean
 
   setSessionId: (id: string) => void
+  hydrateSnapshot: (snapshot: SessionSnapshot) => void
+  markEventSeen: (eventId?: string) => boolean
   setTask: (task: Task | null) => void
   setStatus: (status: SessionState['status']) => void
   setCurrentStep: (step: string) => void
@@ -57,6 +80,8 @@ function persistState(partial: Partial<SessionState>): void {
 
 const baseInitialState = {
   sessionId: null,
+  clientId: createClientId(),
+  deviceType: detectDeviceType(),
   task: null,
   status: 'idle' as const,
   currentStep: '',
@@ -65,6 +90,7 @@ const baseInitialState = {
   slides: null,
   canvas: null,
   messages: [],
+  seenEventIds: [],
   wsConnected: false,
 }
 
@@ -79,6 +105,37 @@ export const useSessionStore = create<SessionState>((set) => ({
   setSessionId: (id) => {
     persistState({ sessionId: id })
     set({ sessionId: id })
+  },
+  hydrateSnapshot: (snapshot) => {
+    const next = {
+      sessionId: snapshot.session.id,
+      task: snapshot.task,
+      status: (snapshot.task?.status === 'completed'
+        ? 'completed'
+        : snapshot.task?.status === 'failed'
+          ? 'failed'
+          : snapshot.task
+            ? 'running'
+            : 'connected') as SessionState['status'],
+      currentStep: snapshot.task?.current_step || '',
+      progress: snapshot.task?.progress || 0,
+      doc: snapshot.doc,
+      slides: snapshot.slides,
+      messages: snapshot.messages || [],
+    }
+    persistState(next)
+    set(next)
+  },
+  markEventSeen: (eventId) => {
+    if (!eventId) return false
+    let seen = false
+    set((state) => {
+      seen = state.seenEventIds.includes(eventId)
+      if (seen) return state
+      const seenEventIds = [...state.seenEventIds, eventId].slice(-200)
+      return { seenEventIds }
+    })
+    return seen
   },
   setTask: (task) => {
     persistState({ task })

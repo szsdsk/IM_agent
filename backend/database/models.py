@@ -67,8 +67,11 @@ class Event(Base):
     __tablename__ = "events"
 
     id = Column(String(36), primary_key=True, default=generate_id)
-    task_id = Column(String(36), ForeignKey("tasks.id"), nullable=False)
+    task_id = Column(String(36), ForeignKey("tasks.id"), nullable=True)
+    session_id = Column(String(36), nullable=True, index=True)
     event_type = Column(String(50), nullable=False)
+    client_id = Column(String(100), nullable=True)
+    device_type = Column(String(30), nullable=True)
     payload = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

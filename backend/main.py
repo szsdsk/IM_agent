@@ -10,6 +10,7 @@ from backend.config import settings
 from backend.database.connection import init_db
 from backend.api.endpoints import router as api_router
 from backend.services.lark_bot_service import lark_bot_service
+from backend.services.sync_service import sync_service
 
 logging.basicConfig(
     level=logging.INFO if not settings.DEBUG else logging.DEBUG,
@@ -23,9 +24,11 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Agent-Pilot Backend...")
     os.makedirs("data", exist_ok=True)
     await init_db()
+    await sync_service.initialize()
     logger.info("Database initialized")
     yield
     logger.info("Shutting down Agent-Pilot Backend...")
+    await sync_service.shutdown()
     await lark_bot_service.close()
 
 

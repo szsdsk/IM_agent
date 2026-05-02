@@ -115,6 +115,7 @@ export interface Health {
   status: string
   timestamp: string
   version: string
+  local_ip?: string | null
 }
 
 export interface Message {
@@ -132,6 +133,19 @@ export interface Session {
   created_at: string
 }
 
+export interface SessionSnapshot {
+  session: Session
+  tasks: Task[]
+  task: Task | null
+  documents: Document[]
+  doc: Document | null
+  slides_artifacts: Slide[]
+  slides: Slide | null
+  messages: Message[]
+  events: Array<Record<string, any>>
+  last_event_id?: string | null
+}
+
 
 export type PresentationScene =
   | 'management_briefing'
@@ -141,9 +155,28 @@ export type PresentationScene =
   | 'training'
 
 export interface WebSocketMessage {
-  type: 'task.progress' | 'task.completed' | 'task.failed' | 'session.sync' | 'agent.message' | 'pong' | 'doc.updated'
+  type:
+    | 'message.created'
+    | 'task.created'
+    | 'task.progress'
+    | 'task.completed'
+    | 'task.failed'
+    | 'artifact.updated'
+    | 'delivery.created'
+    | 'session.sync'
+    | 'agent.message'
+    | 'pong'
+    | 'doc.updated'
+    | 'slides.updated'
+    | 'canvas.updated'
+    | 'sync.request'
+    | 'sync.response'
+    | string
+  event_id?: string
   task_id?: string
   session_id?: string
+  source_client_id?: string
+  device_type?: string
   step?: string
   message?: string
   progress?: number

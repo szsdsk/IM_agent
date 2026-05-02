@@ -209,6 +209,13 @@ class AgentOrchestrator:
 
         # SyncService broadcast completion
         try:
+            await sync_service.broadcast_task_finished(
+                session_id=current_state.get("session_id", ""),
+                task_id=current_state["task_id"],
+                result=current_state.get("result"),
+                status=current_state.get("status"),
+                error=current_state.get("error"),
+            )
             await sync_service.broadcast_delivery(
                 session_id=current_state.get("session_id", ""),
                 task_id=current_state["task_id"],
@@ -880,6 +887,13 @@ class AgentOrchestrator:
             await self.trigger_callback("completed", completed_message)
             await self._push_completion_to_im(room_id, state)
             try:
+                await sync_service.broadcast_task_finished(
+                    session_id=session_id,
+                    task_id=task_id,
+                    result=state.get("result"),
+                    status=state.get("status"),
+                    error=state.get("error"),
+                )
                 await sync_service.broadcast_delivery(
                     session_id=session_id,
                     task_id=task_id,
@@ -905,6 +919,16 @@ class AgentOrchestrator:
             if ws_sender:
                 await ws_sender(failed_message)
             await self.trigger_callback("completed", failed_message)
+            try:
+                await sync_service.broadcast_task_finished(
+                    session_id=session_id,
+                    task_id=task_id,
+                    result=None,
+                    status="failed",
+                    error=state["error"],
+                )
+            except Exception:
+                pass
             return state
 
     @staticmethod
