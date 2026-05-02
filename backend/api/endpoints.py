@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Set
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.agent.orchestrator import agent_orchestrator
 from backend.config import settings
@@ -29,7 +29,7 @@ from backend.database.connection import async_session_maker, get_db
 from backend.database.models import Document, Event, Session, Slide, Task
 from backend.services.lark_bot_service import build_delivery_status_card, lark_bot_service
 from backend.services.speech_service import speech_service
-from backend.services.sync_service import sync_service
+from backend.services.sync_service import EventType, sync_service
 
 router = APIRouter()
 
@@ -174,6 +174,175 @@ def _extract_result_payload(task: Task) -> Dict[str, Any]:
 def _has_slide_pages(payload: Any) -> bool:
     """判断结果中是否真的包含可预览的 PPT 页面。"""
     return isinstance(payload, dict) and bool(payload.get("slides"))
+
+
+def _iso(value: Any) -> Optional[str]:
+    """把 datetime 安全转换成前端可消费的 ISO 字符串。"""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _task_to_dict(task: Task) -> Dict[str, Any]:
+    """序列化任务，供 session 快照和 WebSocket 同步使用。"""
+    return {
+        "id": task.id,
+        "session_id": task.session_id,
+        "intent": task.intent,
+        "status": task.status,
+        "current_step": task.current_step,
+        "progress": task.progress,
+        "result_json": task.result_json,
+        "created_at": _iso(task.created_at),
+        "updated_at": _iso(task.updated_at),
+    }
+
+
+def _document_to_dict(document: Document) -> Dict[str, Any]:
+    """序列化文档产物。"""
+    return {
+        "id": document.id,
+        "task_id": document.task_id,
+        "content": document.content,
+        "version": document.version,
+        "lark_doc_id": document.lark_doc_id,
+        "lark_doc_url": document.lark_doc_url,
+        "doc_url": document.lark_doc_url,
+        "last_edited_by": document.last_edited_by,
+        "last_edited_at": _iso(document.last_edited_at),
+        "created_at": _iso(document.created_at),
+    }
+
+
+def _slide_to_dict(slide: Slide) -> Dict[str, Any]:
+    """序列化 PPT 产物。"""
+    return {
+        "id": slide.id,
+        "task_id": slide.task_id,
+        "slides_json": slide.slides_json,
+        "file_path": slide.file_path,
+        "created_at": _iso(slide.created_at),
+    }
+
+
+def _event_to_message(event: Event, session_id: str) -> Optional[MessageResponse]:
+    """把 message.created 事件还原为聊天消息。"""
+    payload = event.payload or {}
+    content = payload.get("content")
+    if not content:
+        return None
+    return MessageResponse(
+        id=event.id,
+        session_id=event.session_id or session_id,
+        role=payload.get("role", "system"),
+        content=content,
+        timestamp=event.created_at,
+    )
+
+
+def _task_delivery_confirmed(task: Task) -> bool:
+    """判断任务是否已经确认交付，确认后不再允许继续修改。"""
+    return isinstance(task.result_json, dict) and bool(task.result_json.get("delivery_confirmed"))
+
+
+async def _build_session_state(db: AsyncSession, session_id: str) -> Dict[str, Any]:
+    """构建完整 session 快照，供刷新恢复和新设备加入时同步。"""
+    session_result = await db.execute(select(Session).where(Session.id == session_id))
+    session = session_result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    task_result = await db.execute(
+        select(Task).where(Task.session_id == session_id).order_by(Task.created_at)
+    )
+    tasks = task_result.scalars().all()
+    task_ids = [task.id for task in tasks]
+
+    documents: list[Document] = []
+    slides: list[Slide] = []
+    events: list[Event] = []
+    if task_ids:
+        doc_result = await db.execute(select(Document).where(Document.task_id.in_(task_ids)))
+        documents = doc_result.scalars().all()
+        slide_result = await db.execute(select(Slide).where(Slide.task_id.in_(task_ids)))
+        slides = slide_result.scalars().all()
+        event_result = await db.execute(
+            select(Event)
+            .where(or_(Event.session_id == session_id, Event.task_id.in_(task_ids)))
+            .order_by(Event.created_at)
+        )
+        events = event_result.scalars().all()
+    else:
+        event_result = await db.execute(
+            select(Event).where(Event.session_id == session_id).order_by(Event.created_at)
+        )
+        events = event_result.scalars().all()
+
+    messages = [
+        message
+        for message in (_event_to_message(event, session_id) for event in events if event.event_type == "message.created")
+        if message is not None
+    ]
+    latest_task = tasks[-1] if tasks else None
+    latest_doc = documents[-1] if documents else None
+    latest_slide = slides[-1] if slides else None
+
+    return {
+        "session": {
+            "id": session.id,
+            "user_id": session.user_id,
+            "status": session.status,
+            "created_at": _iso(session.created_at),
+            "updated_at": _iso(session.updated_at),
+        },
+        "tasks": [_task_to_dict(task) for task in tasks],
+        "task": _task_to_dict(latest_task) if latest_task else None,
+        "documents": [_document_to_dict(document) for document in documents],
+        "doc": _document_to_dict(latest_doc) if latest_doc else None,
+        "slides_artifacts": [_slide_to_dict(slide) for slide in slides],
+        "slides": _slide_to_dict(latest_slide) if latest_slide else None,
+        "messages": [message.model_dump(mode="json") for message in messages],
+        "events": [
+            {
+                "event_id": event.id,
+                "type": event.event_type,
+                "task_id": event.task_id,
+                "session_id": event.session_id or session_id,
+                "payload": event.payload or {},
+                "timestamp": _iso(event.created_at),
+            }
+            for event in events[-80:]
+        ],
+        "last_event_id": events[-1].id if events else None,
+    }
+
+
+async def _publish_user_message(
+    session_id: str,
+    task_id: str,
+    content: str,
+    request: SendMessageRequest,
+    exclude_source: bool = True,
+) -> None:
+    """把用户输入作为 message.created 事件广播并落库。"""
+    await sync_service.publish(
+        event_type=EventType.MESSAGE_CREATED,
+        session_id=session_id,
+        task_id=task_id,
+        user_id=request.user_id,
+        source_client_id=request.client_id,
+        device_type=request.device_type,
+        exclude_client=request.client_id if exclude_source else None,
+        data={
+            "role": "user",
+            "content": content,
+            "feedback_task_id": request.feedback_task_id,
+            "presentation_scene": request.presentation_scene,
+            "room_id": request.room_id,
+        },
+    )
 
 
 async def _build_feedback_base_result(db: AsyncSession, task: Task) -> Dict[str, Any]:
@@ -366,7 +535,10 @@ async def _sync_lark_doc_edit(
         db.add(Event(
             id=str(uuid.uuid4()),
             task_id=resolved_task_id or doc_record.task_id,
+            session_id=session_id,
             event_type="document.version_updated",
+            client_id=None,
+            device_type="lark",
             payload=event_payload,
         ))
         await db.commit()
@@ -396,6 +568,8 @@ async def _sync_lark_doc_edit(
 
 
 async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, Any]) -> None:
+    updated_document: Optional[Document] = None
+    updated_slide: Optional[Slide] = None
     task.status = state["status"]
     task.current_step = state["current_step"]
     task.result_json = {
@@ -431,6 +605,7 @@ async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, A
         document.lark_doc_id = state["doc_content"].get("lark_doc_id") or document.lark_doc_id
         document.lark_doc_url = state["doc_content"].get("lark_doc_url") or state["doc_content"].get("doc_url") or document.lark_doc_url
         document.updated_at = datetime.utcnow()
+        updated_document = document
 
     if state.get("slides_content"):
         existing_slide_result = await db.execute(
@@ -446,9 +621,28 @@ async def _persist_task_outputs(db: AsyncSession, task: Task, state: Dict[str, A
         slide.slides_json = state["slides_content"]
         slide.file_path = state["slides_content"].get("file_path")
         slide.updated_at = datetime.utcnow()
+        updated_slide = slide
 
     await db.commit()
     await db.refresh(task)
+    if updated_document:
+        await db.refresh(updated_document)
+        await sync_service.broadcast_artifact_update(
+            session_id=task.session_id,
+            task_id=task.id,
+            artifact_type="document",
+            artifact=_document_to_dict(updated_document),
+            artifact_id=updated_document.id,
+        )
+    if updated_slide:
+        await db.refresh(updated_slide)
+        await sync_service.broadcast_artifact_update(
+            session_id=task.session_id,
+            task_id=task.id,
+            artifact_type="slides",
+            artifact=_slide_to_dict(updated_slide),
+            artifact_id=updated_slide.id,
+        )
 
 
 async def _find_feedback_target(
@@ -552,13 +746,6 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             await db.commit()
             await db.refresh(session)
 
-        async def ws_sender(data: dict):
-            await manager.broadcast({
-                **data,
-                "session_id": session.id,
-                "source": "lark",
-            })
-
         feedback_target = await _find_feedback_target(
             db=db,
             session_id=session.id,
@@ -573,18 +760,19 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
                 if message.get("chat_id") and lark_bot_service.is_configured:
                     await lark_bot_service.send_text(message["chat_id"], "该任务不属于当前聊天，已拒绝修改请求。")
                 return
+            if _task_delivery_confirmed(feedback_target):
+                if message.get("chat_id") and lark_bot_service.is_configured:
+                    await lark_bot_service.send_text(message["chat_id"], "任务已经确认交付，不能继续修改。请发送一个新的需求重新生成。")
+                return
 
-            await manager.broadcast({
-                "type": "agent.message",
-                "task_id": feedback_target.id,
-                "session_id": session.id,
-                "timestamp": datetime.utcnow().isoformat(),
-                "data": {
-                    "content": f"收到修改意见：{text}",
-                    "source": "lark",
-                    "chat_id": message.get("chat_id"),
-                },
-            })
+            lark_request = SendMessageRequest(
+                content=text,
+                user_id=message.get("user_id"),
+                room_id=message.get("chat_id"),
+                client_id=f"lark-{message.get('message_id') or message.get('user_id') or uuid.uuid4()}",
+                device_type="bot",
+            )
+            await _publish_user_message(session.id, feedback_target.id, text, lark_request)
             state = await agent_orchestrator.handle_user_feedback(
                 session_id=session.id,
                 task_id=feedback_target.id,
@@ -592,7 +780,7 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
                 base_result=await _build_feedback_base_result(db, feedback_target),
                 user_id=message.get("user_id"),
                 room_id=message.get("chat_id"),
-                ws_sender=ws_sender,
+                ws_sender=None,
             )
             feedback_target.result_json = {
                 "im_provider": "lark",
@@ -612,17 +800,23 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
         await db.commit()
         await db.refresh(task)
 
-        await manager.broadcast({
-            "type": "agent.message",
-            "task_id": task.id,
-            "session_id": session.id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "data": {
-                "content": f"来自飞书的需求：{text}",
-                "source": "lark",
-                "chat_id": message.get("chat_id"),
-            },
-        })
+        lark_request = SendMessageRequest(
+            content=text,
+            user_id=message.get("user_id"),
+            room_id=message.get("chat_id"),
+            client_id=f"lark-{message.get('message_id') or message.get('user_id') or uuid.uuid4()}",
+            device_type="bot",
+        )
+        await _publish_user_message(session.id, task.id, text, lark_request)
+        await sync_service.publish(
+            event_type=EventType.TASK_CREATED,
+            session_id=session.id,
+            task_id=task.id,
+            user_id=message.get("user_id"),
+            source_client_id=lark_request.client_id,
+            device_type="bot",
+            data={"task": _task_to_dict(task)},
+        )
 
         state = await agent_orchestrator.execute_workflow(
             session_id=session.id,
@@ -630,7 +824,7 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             intent=text,
             user_id=message.get("user_id"),
             room_id=message.get("chat_id"),
-            ws_sender=ws_sender,
+            ws_sender=None,
         )
 
         task.result_json = {
@@ -721,6 +915,20 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
                         "green",
                     )
                     await db.commit()
+                    await sync_service.publish(
+                        event_type=EventType.DELIVERY_CREATED,
+                        session_id=task.session_id,
+                        task_id=task.id,
+                        user_id=open_id,
+                        device_type="bot",
+                        data={
+                            "delivery": {
+                                "status": "confirmed",
+                                "confirmed_by": open_id,
+                                "confirmed_at": result_json["delivery_confirmed"]["confirmed_at"],
+                            }
+                        },
+                    )
 
         if not task_found:
             return _lark_card_toast("没有找到对应任务", "error")
@@ -764,6 +972,19 @@ async def lark_card_action(payload: Dict[str, Any], background_tasks: Background
                             "yellow",
                         )
                         await db.commit()
+                        await sync_service.publish(
+                            event_type=EventType.TASK_PROGRESS,
+                            session_id=task.session_id,
+                            task_id=task.id,
+                            user_id=open_id,
+                            device_type="bot",
+                            data={
+                                "step": "confirm_or_modify",
+                                "progress": task.progress,
+                                "status": "running",
+                                "message": "等待飞书侧修改意见",
+                            },
+                        )
 
         if not task_found:
             return _lark_card_toast("没有找到对应任务", "error")
@@ -919,26 +1140,26 @@ async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
     return session
 
 
+@router.get("/sessions/{session_id}/state")
+async def get_session_state(session_id: str, db: AsyncSession = Depends(get_db)):
+    """返回完整会话快照，用于多端首次进入、刷新和 WebSocket 重连恢复。"""
+    return await _build_session_state(db, session_id)
+
+
 @router.get("/sessions/{session_id}/messages", response_model=list[MessageResponse])
 async def get_session_messages(session_id: str, db: AsyncSession = Depends(get_db)):
+    task_ids_result = await db.execute(select(Task.id).where(Task.session_id == session_id))
+    task_ids = [row[0] for row in task_ids_result.all()]
     result = await db.execute(
-        select(Event).where(
-            Event.task_id.in_(
-                select(Task.id).where(Task.session_id == session_id)
-            )
-        ).order_by(Event.created_at)
+        select(Event)
+        .where(
+            Event.event_type == "message.created",
+            or_(Event.session_id == session_id, Event.task_id.in_(task_ids)) if task_ids else Event.session_id == session_id,
+        )
+        .order_by(Event.created_at)
     )
     events = result.scalars().all()
-    return [
-        MessageResponse(
-            id=e.id,
-            session_id=session_id,
-            role="system",
-            content=e.payload.get("content", "") if e.payload else "",
-            timestamp=e.created_at,
-        )
-        for e in events
-    ]
+    return [message for message in (_event_to_message(event, session_id) for event in events) if message]
 
 
 @router.post("/sessions/{session_id}/messages", response_model=TaskResponse)
@@ -952,16 +1173,6 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    async def ws_sender(data: dict):
-        await manager.send_to_session(session_id, data)
-        if request.room_id:
-            await manager.broadcast({
-                **data,
-                "session_id": session_id,
-                "source": "lark",
-                "room_id": request.room_id,
-            })
-
     feedback_target = await _find_feedback_target(
         db=db,
         session_id=session_id,
@@ -974,6 +1185,9 @@ async def send_message(
     if feedback_target:
         if not _room_can_mutate_task(feedback_target, request.room_id):
             raise HTTPException(status_code=403, detail="This room is not allowed to modify the task")
+        if _task_delivery_confirmed(feedback_target):
+            raise HTTPException(status_code=409, detail="Task has been confirmed and cannot be modified")
+        await _publish_user_message(session_id, feedback_target.id, request.content, request)
         state = await agent_orchestrator.handle_user_feedback(
             session_id=session_id,
             task_id=feedback_target.id,
@@ -985,7 +1199,7 @@ async def send_message(
                 if isinstance(feedback_target.result_json, dict)
                 else None
             ),
-            ws_sender=ws_sender,
+            ws_sender=None,
         )
         await _persist_task_outputs(db, feedback_target, state)
         return feedback_target
@@ -999,6 +1213,16 @@ async def send_message(
     db.add(task)
     await db.commit()
     await db.refresh(task)
+    await _publish_user_message(session_id, task.id, request.content, request)
+    await sync_service.publish(
+        event_type=EventType.TASK_CREATED,
+        session_id=session_id,
+        task_id=task.id,
+        user_id=request.user_id,
+        source_client_id=request.client_id,
+        device_type=request.device_type,
+        data={"task": _task_to_dict(task)},
+    )
 
     state = await agent_orchestrator.execute_workflow(
         session_id=session_id,
@@ -1007,7 +1231,7 @@ async def send_message(
         user_id=request.user_id,
         room_id=request.room_id,
         presentation_scene=request.presentation_scene,
-        ws_sender=ws_sender,
+        ws_sender=None,
     )
 
     if request.room_id:
@@ -1037,13 +1261,27 @@ async def confirm_task(
         raise HTTPException(status_code=404, detail="Task not found")
 
     if request.confirmed:
+        result_json = dict(task.result_json) if isinstance(task.result_json, dict) else {}
+        result_json["delivery_confirmed"] = {
+            "source": "web",
+            "confirmed_at": datetime.utcnow().isoformat(),
+        }
         task.status = "completed"
+        task.result_json = result_json
         task.updated_at = datetime.utcnow()
         await db.commit()
         await db.refresh(task)
+        await sync_service.publish(
+            event_type=EventType.DELIVERY_CREATED,
+            session_id=task.session_id,
+            task_id=task.id,
+            data={"delivery": result_json["delivery_confirmed"]},
+        )
         return task
 
     if request.feedback:
+        if _task_delivery_confirmed(task):
+            raise HTTPException(status_code=409, detail="Task has been confirmed and cannot be modified")
         state = await agent_orchestrator.handle_user_feedback(
             session_id=task.session_id,
             task_id=task.id,
@@ -1130,24 +1368,51 @@ async def download_slide_file(filename: str):
 
 @router.websocket("/ws/sessions/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    await manager.connect(websocket, session_id)
+    client_id = websocket.query_params.get("client_id") or str(uuid.uuid4())
+    device_type = websocket.query_params.get("device_type") or "web"
+    await websocket.accept()
+    await sync_service.subscribe(
+        session_id=session_id,
+        client_id=client_id,
+        device_type=device_type,
+        send=websocket.send_json,
+    )
     try:
+        async with async_session_maker() as db:
+            snapshot = await _build_session_state(db, session_id)
+        await websocket.send_json({
+            "type": "session.sync",
+            "event_id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "source_client_id": "server",
+            "device_type": device_type,
+            "state": snapshot,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
         while True:
             data = await websocket.receive_json()
             if data.get("type") == "ping":
-                await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
+                await websocket.send_json({
+                    "type": "pong",
+                    "event_id": str(uuid.uuid4()),
+                    "session_id": session_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
             elif data.get("type") == "message":
                 request = SendMessageRequest(
                     content=data.get("content", ""),
                     presentation_scene=data.get("presentation_scene"),
+                    feedback_task_id=data.get("feedback_task_id"),
+                    user_id=data.get("user_id"),
+                    room_id=data.get("room_id"),
+                    client_id=client_id,
+                    device_type=device_type,
                 )
                 async with async_session_maker() as session_result:
                     result = await session_result.execute(select(Session).where(Session.id == session_id))
                     session = result.scalar_one_or_none()
                     if session:
-                        async def ws_sender(msg: dict):
-                            await websocket.send_json(msg)
-
                         feedback_target = await _find_feedback_target(
                             db=session_result,
                             session_id=session_id,
@@ -1158,6 +1423,24 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         )
 
                         if feedback_target:
+                            if _task_delivery_confirmed(feedback_target):
+                                await websocket.send_json({
+                                    "type": "task.failed",
+                                    "event_id": str(uuid.uuid4()),
+                                    "session_id": session_id,
+                                    "task_id": feedback_target.id,
+                                    "status": "failed",
+                                    "error": "Task has been confirmed and cannot be modified",
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                })
+                                continue
+                            await _publish_user_message(
+                                session_id,
+                                feedback_target.id,
+                                request.content,
+                                request,
+                                exclude_source=False,
+                            )
                             state = await agent_orchestrator.handle_user_feedback(
                                 session_id=session_id,
                                 task_id=feedback_target.id,
@@ -1165,7 +1448,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 base_result=await _build_feedback_base_result(session_result, feedback_target),
                                 user_id=request.user_id,
                                 room_id=request.room_id,
-                                ws_sender=ws_sender,
+                                ws_sender=None,
                             )
                             await _persist_task_outputs(session_result, feedback_target, state)
                             continue
@@ -1179,6 +1462,22 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         session_result.add(task)
                         await session_result.commit()
                         await session_result.refresh(task)
+                        await _publish_user_message(
+                            session_id,
+                            task.id,
+                            request.content,
+                            request,
+                            exclude_source=False,
+                        )
+                        await sync_service.publish(
+                            event_type=EventType.TASK_CREATED,
+                            session_id=session_id,
+                            task_id=task.id,
+                            user_id=request.user_id,
+                            source_client_id=client_id,
+                            device_type=device_type,
+                            data={"task": _task_to_dict(task)},
+                        )
 
                         state = await agent_orchestrator.execute_workflow(
                             session_id=session_id,
@@ -1187,11 +1486,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             user_id=request.user_id,
                             room_id=request.room_id,
                             presentation_scene=request.presentation_scene,
-                            ws_sender=ws_sender,
+                            ws_sender=None,
                         )
 
                         await _persist_task_outputs(session_result, task, state)
     except WebSocketDisconnect:
-        manager.disconnect(websocket, session_id)
-    except Exception:
-        manager.disconnect(websocket, session_id)
+        await sync_service.unsubscribe(client_id)
+    except Exception as exc:
+        logger.exception("WebSocket session %s client %s failed: %s", session_id, client_id, exc)
+        await sync_service.unsubscribe(client_id)

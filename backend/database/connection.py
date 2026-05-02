@@ -60,3 +60,17 @@ async def _run_sqlite_schema_patches(conn) -> None:
     for column_name, column_type in missing_document_columns.items():
         if column_name not in documents_columns:
             await conn.execute(text(f"ALTER TABLE documents ADD COLUMN {column_name} {column_type}"))
+
+    events_columns = {
+        row[1]
+        for row in (await conn.exec_driver_sql("PRAGMA table_info(events)")).fetchall()
+    }
+    missing_event_columns = {
+        "session_id": "VARCHAR(36)",
+        "client_id": "VARCHAR(100)",
+        "device_type": "VARCHAR(30)",
+    }
+
+    for column_name, column_type in missing_event_columns.items():
+        if column_name not in events_columns:
+            await conn.execute(text(f"ALTER TABLE events ADD COLUMN {column_name} {column_type}"))

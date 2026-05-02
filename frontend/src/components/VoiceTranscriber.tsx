@@ -139,6 +139,8 @@ export default function VoiceTranscriber() {
   const {
     messages,
     sessionId,
+    clientId,
+    deviceType,
     task,
     status,
     setSessionId,
@@ -206,14 +208,24 @@ export default function VoiceTranscriber() {
           content: '当前离线，消息已暂存，恢复网络后会自动发送。',
           timestamp: new Date().toISOString(),
         })
+        setStatus('connected')
         return
       }
       const activeSessionId = await ensureSession()
-      const nextTask = await api.sendMessage(activeSessionId, content, undefined, presentationScene, feedbackTaskId)
+      const nextTask = await api.sendMessage(
+        activeSessionId,
+        content,
+        undefined,
+        presentationScene,
+        feedbackTaskId,
+        clientId,
+        deviceType
+      )
       setTask(nextTask)
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
     } catch (e) {
       setError(e instanceof Error ? e.message : '发送失败')
+      setStatus('error')
     } finally {
       setSending(false)
     }
@@ -233,7 +245,9 @@ export default function VoiceTranscriber() {
             item.content,
             undefined,
             item.presentationScene,
-            item.feedbackTaskId
+            item.feedbackTaskId,
+            clientId,
+            deviceType
           )
           setTask(nextTask)
         }

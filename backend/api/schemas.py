@@ -24,6 +24,8 @@ class SendMessageRequest(BaseModel):
     room_id: Optional[str] = None
     feedback_task_id: Optional[str] = None
     presentation_scene: Optional[str] = None
+    client_id: Optional[str] = None
+    device_type: Optional[str] = None
 
 
 class MessageResponse(BaseModel):
