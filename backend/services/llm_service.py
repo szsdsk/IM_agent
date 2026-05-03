@@ -600,8 +600,15 @@ SYSTEM_PROMPTS = {
 - 每页有明确标题和内容
 - 控制信息密度，适合演讲展示
 - 给每页选择明确页面意图：结论页、指标页、流程页、对比页、时间线页、Q&A 页
-- layout 优先从 hero、metrics、timeline、comparison、process、cards、closing 中选择；必要时可用 content、two_column、diagram
+- layout 优先从 hero、metrics、timeline、comparison、process、cards、chart、closing 中选择；必要时可用 content、two_column、diagram
 - 指标页把关键数字放入 highlight_metrics，时间线页放入 timeline，流程页放入 process_steps，对比/卡片页放入 sections
+- 当内容涉及数量对比、趋势变化、占比分布时（如季度收入、市场占比、增长趋势、同比环比），优先使用 chart layout，并在 chart 字段输出图表数据
+- chart 字段格式：{"type": "bar"|"pie"|"line"|"horizontal_bar", "title": "图表标题", "categories": ["Q1", "Q2", ...], "series": [{"name": "系列名", "values": [100, 150, ...]}]}
+- chart layout 示例：
+  - 季度收入对比 → type: "bar", categories: ["Q1", "Q2", "Q3", "Q4"], series: [{"name": "收入(万元)", "values": [120, 150, 180, 210]}]
+  - 市场占比 → type: "pie", categories: ["产品A", "产品B", "产品C"], series: [{"name": "份额", "values": [45, 35, 20]}]
+  - 增长趋势 → type: "line", categories: ["1月", "2月", "3月", "4月", "5月"], series: [{"name": "用户数", "values": [1000, 1200, 1500, 1800, 2200]}]
+  - 多系列对比 → type: "bar", categories: ["Q1", "Q2", "Q3"], series: [{"name": "2024", "values": [100, 130, 160]}, {"name": "2025", "values": [120, 150, 180]}]
 - 适当使用图表和可视化建议，但不要输出 CSS、坐标或外部图片 URL
 - 输出结构化演示稿信息
 - theme 字段从 business_blue / tech_dark / minimal / emerald / slate / sunset / entertainment 中选择最合适的主题

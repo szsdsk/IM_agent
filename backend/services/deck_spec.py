@@ -130,7 +130,7 @@ class SlideSpec:
     layout_variant: Optional[str] = None
     highlight_metrics: List[Dict[str, str]] = field(default_factory=list)
     sections: List[Dict[str, str]] = field(default_factory=list)
-    chart: Optional[Dict[str, Any]] = None
+    chart: Optional[Dict[str, Any]] = None  # {"type": "bar"|"pie"|"line"|"horizontal_bar", "title": str, "categories": [str], "series": [{"name": str, "values": [number]}]}
     timeline: List[Dict[str, str]] = field(default_factory=list)
     process_steps: List[Dict[str, str]] = field(default_factory=list)
 
@@ -362,7 +362,7 @@ def validate_deck_spec(deck: DeckSpec) -> List[str]:
         valid_layouts = [
             "title", "content", "two_column", "diagram", "image", "blank",
             "hero", "section_divider", "metrics", "timeline", "comparison",
-            "process", "cards", "closing",
+            "process", "cards", "closing", "chart",
         ]
         if slide.layout not in valid_layouts:
             errors.append(f"Slide {i} has invalid layout: {slide.layout}")

@@ -18,6 +18,7 @@ NUMERIC_PATTERN = re.compile(r"([+-]?\d+(?:\.\d+)?\s*(?:%|x|X|倍|万|千|百|�
 TIMELINE_PATTERN = re.compile(r"(第\s*\d+|phase|阶段|里程碑|day|week|周|月|上线|灰度|发布)", re.IGNORECASE)
 PROCESS_PATTERN = re.compile(r"(步骤|流程|路径|闭环|输入|输出|采集|分析|生成|交付|同步|回流|触发|执行)")
 COMPARISON_PATTERN = re.compile(r"(对比|优势|劣势|优点|缺点|before|after|现状|目标|风险|机会)", re.IGNORECASE)
+CHART_PATTERN = re.compile(r"(收入|营收|占比|增长|趋势|比例|份额|同比|环比|季度|月度|分布|对比数据|图表|柱状|折线|饼图)", re.IGNORECASE)
 
 
 SCENE_THEME_MAP = {
@@ -76,6 +77,11 @@ def _normalize_slide(slide: SlideSpec, index: int, total: int, profile: str) -> 
     if layout == "process" and not steps:
         steps = [{"label": f"Step {i + 1}", "text": item} for i, item in enumerate(bullets[:5])]
 
+    # Upgrade to chart layout if chart data present or title suggests chart
+    chart_data = slide.chart
+    if layout not in {"hero", "closing"} and (chart_data or CHART_PATTERN.search(slide.title or "")):
+        layout = "chart"
+
     max_bullets = 6 if layout in {"content", "two_column"} else 4
     return replace(
         slide,
@@ -94,7 +100,7 @@ def _normalize_slide(slide: SlideSpec, index: int, total: int, profile: str) -> 
 
 def _pick_layout(current: str, title: str, bullets: List[str], index: int, total: int) -> str:
     title_text = title.lower()
-    if current in {"hero", "section_divider", "metrics", "timeline", "comparison", "process", "cards", "closing"}:
+    if current in {"hero", "section_divider", "metrics", "timeline", "comparison", "process", "cards", "chart", "closing"}:
         return current
     if index == 0 or current == "title":
         return "hero"
