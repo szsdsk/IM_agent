@@ -136,7 +136,9 @@ async function convertToPcm16k(blob: Blob): Promise<Blob> {
 }
 
 function messageTime(message: Message): string {
-  const date = new Date(message.timestamp)
+  // 后端历史消息来自 UTC，但旧 SQLite 记录可能没有 Z 后缀；这里补齐时区避免显示少 8 小时。
+  const normalized = /[zZ]|[+-]\d{2}:\d{2}$/.test(message.timestamp) ? message.timestamp : `${message.timestamp}Z`
+  const date = new Date(normalized)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }

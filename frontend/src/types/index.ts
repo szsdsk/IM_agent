@@ -118,6 +118,15 @@ export interface CanvasArtifact {
   nodes?: Array<Record<string, any>>
   edges?: Array<Record<string, any>>
   layers?: string[][]
+  elements?: Array<Record<string, any>>
+  viewport?: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+  metadata?: Record<string, any>
+  exportable?: boolean
 }
 
 export interface Health {
@@ -150,6 +159,7 @@ export interface SessionSnapshot {
   doc: Document | null
   slides_artifacts: Slide[]
   slides: Slide | null
+  canvas?: CanvasArtifact | null
   messages: Message[]
   events: Array<Record<string, any>>
   last_event_id?: string | null

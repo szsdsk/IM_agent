@@ -91,6 +91,7 @@ class WebSocketService {
       case 'message.created': {
         const payload = this.payload(data)
         if (!payload.content) return
+        if (data.source_client_id && data.source_client_id === store.clientId) return
         store.addMessage({
           id: data.event_id || `msg-${Date.now()}`,
           role: payload.role || 'system',

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from backend.config import settings
 from backend.services.affine_service import affine_service
+from backend.services.canvas_layout import normalize_canvas_artifact
 from backend.tools.base import BaseTool
 
 
@@ -28,7 +29,7 @@ class CanvasTool(BaseTool):
 
         return StructuredTool.from_function(
             name="canvas_tool",
-            description="Create or update an AFFiNE canvas artifact.",
+            description="Create or update a local interactive canvas artifact.",
             coroutine=self._run,
             args_schema=CanvasToolInput,
         )
@@ -48,58 +49,65 @@ class CanvasTool(BaseTool):
         self._log("info", f"Canvas action: {action}", {"task_id": task_id, "canvas_id": canvas_id})
         if not self._validate_input({"action": action}, ["action"]):
             return {"success": False, "error": "Missing required parameter: action"}
-        if self.mock_mode:
-            return self._mock_run(action, task_id, canvas_id, title, elements, nodes, edges, layers)
 
         try:
             if action == "create_canvas":
-                workspace_id = await self._ensure_workspace(workspace_id, task_id)
-                created = await affine_service.create_canvas(workspace_id, title or "Agent-Pilot Canvas")
-                return self._with_canvas_payload(created, workspace_id, title)
+                return self._local_canvas_payload(
+                    action=action,
+                    task_id=task_id,
+                    workspace_id=workspace_id,
+                    canvas_id=canvas_id,
+                    title=title,
+                    elements=elements,
+                    nodes=nodes,
+                    edges=edges,
+                    layers=layers,
+                    diagram_type="flow",
+                )
 
             if action == "add_elements":
                 if not canvas_id:
                     return {"success": False, "error": "Missing required parameter: canvas_id"}
-                result = await affine_service.add_canvas_elements(canvas_id, elements or [])
-                return {**result, "provider": self._provider(), "elements": elements or []}
+                return self._local_canvas_payload(
+                    action=action,
+                    task_id=task_id,
+                    workspace_id=workspace_id,
+                    canvas_id=canvas_id,
+                    title=title,
+                    elements=elements,
+                    nodes=nodes,
+                    edges=edges,
+                    layers=layers,
+                    diagram_type="flow",
+                )
 
             if action == "create_flow_diagram":
-                workspace_id = await self._ensure_workspace(workspace_id, task_id)
-                canvas = await self._ensure_canvas(workspace_id, canvas_id, title)
-                flow_edges = [
-                    {
-                        "from": edge.get("from") or edge.get("source"),
-                        "to": edge.get("to") or edge.get("target"),
-                        "label": edge.get("label", ""),
-                    }
-                    for edge in (edges or [])
-                ]
-                result = await affine_service.create_flow_diagram(
-                    canvas["canvas_id"],
-                    title or "流程图",
-                    nodes or [],
-                    flow_edges,
+                return self._local_canvas_payload(
+                    action=action,
+                    task_id=task_id,
+                    workspace_id=workspace_id,
+                    canvas_id=canvas_id,
+                    title=title,
+                    elements=elements,
+                    nodes=nodes,
+                    edges=edges,
+                    layers=layers,
+                    diagram_type="flow",
                 )
-                return {
-                    **result,
-                    **canvas,
-                    "provider": self._provider(),
-                    "diagram_type": "flow",
-                    "nodes": nodes or [],
-                    "edges": edges or [],
-                }
 
             if action == "create_architecture_diagram":
-                workspace_id = await self._ensure_workspace(workspace_id, task_id)
-                canvas = await self._ensure_canvas(workspace_id, canvas_id, title)
-                result = await affine_service.create_architecture_diagram(canvas["canvas_id"], layers or [])
-                return {
-                    **result,
-                    **canvas,
-                    "provider": self._provider(),
-                    "diagram_type": "architecture",
-                    "layers": layers or [],
-                }
+                return self._local_canvas_payload(
+                    action=action,
+                    task_id=task_id,
+                    workspace_id=workspace_id,
+                    canvas_id=canvas_id,
+                    title=title,
+                    elements=elements,
+                    nodes=nodes,
+                    edges=edges,
+                    layers=layers,
+                    diagram_type="architecture",
+                )
 
             return {"success": False, "error": f"Unknown action: {action}"}
         except Exception as exc:
@@ -117,24 +125,54 @@ class CanvasTool(BaseTool):
         edges: Optional[List[Dict[str, Any]]],
         layers: Optional[List[List[str]]],
     ) -> Dict[str, Any]:
-        mock_canvas_id = canvas_id or f"canvas_{task_id or 'local'}"
-        payload = {
-            "success": True,
-            "provider": "local_mock",
-            "workspace_id": f"ws_{task_id or 'local'}",
-            "canvas_id": mock_canvas_id,
-            "title": title or "Agent-Pilot Canvas",
-            "url": None,
-        }
-        if action == "create_canvas":
-            return payload
+        if action in {"create_canvas", "add_elements", "create_architecture_diagram", "create_flow_diagram"}:
+            return self._local_canvas_payload(
+                action=action,
+                task_id=task_id,
+                workspace_id=None,
+                canvas_id=canvas_id,
+                title=title,
+                elements=elements,
+                nodes=nodes,
+                edges=edges,
+                layers=layers,
+                diagram_type="architecture" if action == "create_architecture_diagram" else "flow",
+            )
+        return {"success": False, "provider": "local_canvas", "error": f"Unknown action: {action}"}
+
+    def _local_canvas_payload(
+        self,
+        action: str,
+        task_id: Optional[str],
+        workspace_id: Optional[str],
+        canvas_id: Optional[str],
+        title: Optional[str],
+        elements: Optional[List[Dict[str, Any]]],
+        nodes: Optional[List[Dict[str, Any]]],
+        edges: Optional[List[Dict[str, Any]]],
+        layers: Optional[List[List[str]]],
+        diagram_type: str,
+    ) -> Dict[str, Any]:
+        """本地画布始终可用；AFFiNE 只作为后续同步状态，不阻塞 Demo。"""
+        resolved_workspace_id = workspace_id or f"ws_{task_id or 'local'}"
+        resolved_canvas_id = canvas_id or f"canvas_{task_id or 'local'}"
+        payload = normalize_canvas_artifact(
+            title=title or "Agent-Pilot 画布",
+            diagram_type=diagram_type,
+            task_id=task_id,
+            workspace_id=resolved_workspace_id,
+            canvas_id=resolved_canvas_id,
+            nodes=nodes or [],
+            edges=edges or [],
+            layers=layers or [],
+            elements=elements or [],
+            provider=self._provider(),
+            url=self._canvas_url(workspace_id, canvas_id),
+            affine_configured=affine_service.is_configured,
+        )
         if action == "add_elements":
-            return {**payload, "elements_added": len(elements or []), "elements": elements or []}
-        if action == "create_architecture_diagram":
-            return {**payload, "diagram_type": "architecture", "layers": layers or []}
-        if action == "create_flow_diagram":
-            return {**payload, "diagram_type": "flow", "nodes": nodes or [], "edges": edges or []}
-        return {"success": False, "provider": "local_mock", "error": f"Unknown action: {action}"}
+            payload["elements_added"] = len(elements or [])
+        return payload
 
     async def _ensure_workspace(self, workspace_id: Optional[str], task_id: Optional[str]) -> str:
         if workspace_id:
@@ -168,7 +206,7 @@ class CanvasTool(BaseTool):
         }
 
     def _provider(self) -> str:
-        return "affine" if affine_service.is_configured and not self.mock_mode else "local_mock"
+        return "local_canvas"
 
     def _canvas_url(self, workspace_id: Optional[str], canvas_id: Optional[str]) -> Optional[str]:
         if not affine_service.is_configured or not workspace_id or not canvas_id:

@@ -61,6 +61,12 @@ class TaskConfirmRequest(BaseModel):
     feedback: Optional[str] = None
 
 
+class CanvasUpdateRequest(BaseModel):
+    canvas: Dict[str, Any]
+    client_id: Optional[str] = None
+    device_type: Optional[str] = None
+
+
 class DocumentResponse(BaseModel):
     id: str
     task_id: str

@@ -543,6 +543,11 @@ async def generate_canvas(state: AgentState) -> AgentState:
             "nodes": result.get("nodes") or spec.get("nodes", []),
             "edges": result.get("edges") or spec.get("edges", []),
             "layers": result.get("layers") or spec.get("layers", []),
+            # 前端 SVG 画布直接消费 elements/viewport，旧字段仍保留给兼容逻辑。
+            "elements": result.get("elements", []),
+            "viewport": result.get("viewport"),
+            "metadata": result.get("metadata", {}),
+            "exportable": result.get("exportable", True),
         }
         _append_message(state, "assistant", "结构图已生成", "generate_canvas")
     except Exception as exc:

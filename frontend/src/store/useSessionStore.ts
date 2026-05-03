@@ -94,9 +94,45 @@ const baseInitialState = {
   wsConnected: false,
 }
 
+function timestampMs(value: string): number {
+  // 后端 SQLite 中的 UTC 时间可能没有时区后缀；前端统一按 UTC 解析。
+  const normalized = /[zZ]|[+-]\d{2}:\d{2}$/.test(value) ? value : `${value}Z`
+  const ms = new Date(normalized).getTime()
+  return Number.isNaN(ms) ? 0 : ms
+}
+
+function sameMessage(a: Message, b: Message): boolean {
+  if (a.id === b.id) return true
+  if (a.role !== b.role || a.content.trim() !== b.content.trim()) return false
+  // 用户输入会先乐观显示，再被后端事件/快照回填；2 分钟内同内容视为同一条。
+  if (a.role === 'user') return Math.abs(timestampMs(a.timestamp) - timestampMs(b.timestamp)) <= 2 * 60 * 1000
+  return false
+}
+
+function mergeMessages(messages: Message[]): Message[] {
+  const merged: Message[] = []
+  for (const message of messages) {
+    const existingIndex = merged.findIndex((item) => sameMessage(item, message))
+    if (existingIndex >= 0) {
+      // 保留后端事件 id，同时优先使用能被正确解析的时间戳。
+      merged[existingIndex] = {
+        ...merged[existingIndex],
+        ...message,
+        timestamp: message.timestamp || merged[existingIndex].timestamp,
+      }
+      continue
+    }
+    merged.push(message)
+  }
+  return merged.slice(-80)
+}
+
 const initialState = {
   ...baseInitialState,
   ...loadPersistedState(),
+}
+if (Array.isArray(initialState.messages)) {
+  initialState.messages = mergeMessages(initialState.messages)
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -121,7 +157,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       progress: snapshot.task?.progress || 0,
       doc: snapshot.doc,
       slides: snapshot.slides,
-      messages: snapshot.messages || [],
+      canvas: snapshot.canvas || null,
+      messages: mergeMessages(snapshot.messages || []),
     }
     persistState(next)
     set(next)
@@ -168,14 +205,15 @@ export const useSessionStore = create<SessionState>((set) => ({
   
   addMessage: (message) => 
     set((state) => {
-      const messages = [...state.messages, message].slice(-80)
+      const messages = mergeMessages([...state.messages, message])
       persistState({ messages })
       return { messages }
     }),
 
   setMessages: (messages) => {
-    persistState({ messages })
-    set({ messages })
+    const merged = mergeMessages(messages)
+    persistState({ messages: merged })
+    set({ messages: merged })
   },
 
   setWsConnected: (connected) => set({ wsConnected: connected }),

@@ -66,8 +66,10 @@ class LangChainToolTests(unittest.IsolatedAsyncioTestCase):
         })
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["provider"], "local_mock")
+        self.assertEqual(result["provider"], "local_canvas")
         self.assertEqual(result["diagram_type"], "flow")
+        self.assertTrue(result["exportable"])
+        self.assertGreater(len(result["elements"]), 0)
 
     async def test_markdown_to_lark_blocks_uses_supported_block_types(self):
         # 飞书 Docx OpenAPI 不支持 block_type=16；列表和引用块要使用当前可写入的类型。

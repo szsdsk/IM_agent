@@ -184,7 +184,8 @@ class CanvasGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         canvas_spec.assert_awaited_once()
         self.assertFalse(canvas_spec.await_args.kwargs["use_llm"])
-        self.assertEqual(result["canvas_content"]["provider"], "local_mock")
+        self.assertEqual(result["canvas_content"]["provider"], "local_canvas")
+        self.assertTrue(result["canvas_content"]["exportable"])
 
 
 class ContentAwareGenerationTests(unittest.IsolatedAsyncioTestCase):

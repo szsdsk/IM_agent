@@ -4,7 +4,7 @@ import re
 import socket
 import uuid
 from difflib import unified_diff
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.agent.orchestrator import agent_orchestrator
 from backend.config import settings
 from backend.api.schemas import (
+    CanvasUpdateRequest,
     CreateSessionRequest,
     DocumentResponse,
     HealthResponse,
@@ -172,6 +173,13 @@ def _extract_result_payload(task: Task) -> Dict[str, Any]:
     return {}
 
 
+def _task_canvas_payload(task: Task) -> Optional[Dict[str, Any]]:
+    """从任务结果中取出画布产物，供快照恢复和本地编辑保存复用。"""
+    result = _extract_result_payload(task)
+    canvas = result.get("canvas")
+    return canvas if isinstance(canvas, dict) else None
+
+
 def _has_slide_pages(payload: Any) -> bool:
     """判断结果中是否真的包含可预览的 PPT 页面。"""
     return isinstance(payload, dict) and bool(payload.get("slides"))
@@ -182,8 +190,15 @@ def _iso(value: Any) -> Optional[str]:
     if value is None:
         return None
     if hasattr(value, "isoformat"):
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc).isoformat()
         return value.isoformat()
     return str(value)
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    """把数据库中的 naive UTC datetime 转成带时区对象，避免前端误按本地时间解析。"""
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def _task_to_dict(task: Task) -> Dict[str, Any]:
@@ -239,7 +254,7 @@ def _event_to_message(event: Event, session_id: str) -> Optional[MessageResponse
         session_id=event.session_id or session_id,
         role=payload.get("role", "system"),
         content=content,
-        timestamp=event.created_at,
+        timestamp=_utc_datetime(event.created_at),
     )
 
 
@@ -397,6 +412,10 @@ async def _build_session_state(db: AsyncSession, session_id: str) -> Dict[str, A
     latest_task = tasks[-1] if tasks else None
     latest_doc = documents[-1] if documents else None
     latest_slide = slides[-1] if slides else None
+    latest_canvas = next(
+        (canvas for canvas in (_task_canvas_payload(task) for task in reversed(tasks)) if canvas),
+        None,
+    )
 
     return {
         "session": {
@@ -412,6 +431,7 @@ async def _build_session_state(db: AsyncSession, session_id: str) -> Dict[str, A
         "doc": _document_to_dict(latest_doc) if latest_doc else None,
         "slides_artifacts": [_slide_to_dict(slide) for slide in slides],
         "slides": _slide_to_dict(latest_slide) if latest_slide else None,
+        "canvas": latest_canvas,
         "messages": [message.model_dump(mode="json") for message in messages],
         "events": [
             {
@@ -1386,6 +1406,62 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@router.patch("/tasks/{task_id}/canvas")
+async def update_task_canvas(
+    task_id: str,
+    request: CanvasUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """保存网页端本地画布编辑结果，并把最新画布广播给同一 session 的客户端。"""
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if _task_delivery_confirmed(task):
+        raise HTTPException(status_code=409, detail="Task has been confirmed and cannot be modified")
+
+    old_canvas = _task_canvas_payload(task) or {}
+    old_metadata = old_canvas.get("metadata") if isinstance(old_canvas.get("metadata"), dict) else {}
+    canvas = dict(request.canvas or {})
+    if not canvas:
+        raise HTTPException(status_code=400, detail="Canvas payload is required")
+
+    metadata = dict(canvas.get("metadata") or {})
+    try:
+        next_version = int(old_metadata.get("version") or metadata.get("version") or 1) + 1
+    except (TypeError, ValueError):
+        next_version = 2
+    metadata.update({
+        "version": next_version,
+        "sync_status": metadata.get("sync_status") or old_metadata.get("sync_status") or "local_only",
+        "last_edited_at": datetime.utcnow().isoformat(),
+        "last_edited_by": request.client_id or "web",
+    })
+    canvas["metadata"] = metadata
+    canvas["provider"] = canvas.get("provider") or old_canvas.get("provider") or "local_canvas"
+    canvas["canvas_id"] = canvas.get("canvas_id") or old_canvas.get("canvas_id") or f"canvas_{task.id}"
+    canvas["exportable"] = canvas.get("exportable", True)
+
+    result_json = dict(task.result_json) if isinstance(task.result_json, dict) else {}
+    result_payload = dict(result_json.get("result")) if isinstance(result_json.get("result"), dict) else {}
+    result_payload["canvas"] = canvas
+    result_json["result"] = result_payload
+    result_json.setdefault("progress", task.progress)
+    task.result_json = result_json
+    task.updated_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(task)
+    await sync_service.broadcast_artifact_update(
+        session_id=task.session_id,
+        task_id=task.id,
+        artifact_type="canvas",
+        artifact=canvas,
+        artifact_id=canvas.get("canvas_id"),
+    )
+    return {"success": True, "canvas": canvas, "task": _task_to_dict(task)}
 
 
 @router.post("/tasks/{task_id}/confirm", response_model=TaskResponse)

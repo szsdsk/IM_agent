@@ -1,4 +1,4 @@
-import type { Session, SessionSnapshot, Task, Document, DocumentHistoryItem, Slide, Message, Health, PresentationScene } from '../types'
+import type { CanvasArtifact, Session, SessionSnapshot, Task, Document, DocumentHistoryItem, Slide, Message, Health, PresentationScene } from '../types'
 
 const API_BASE = '/api'
 
@@ -74,6 +74,22 @@ export const api = {
     return fetchAPI<Task>(`/tasks/${taskId}/confirm`, {
       method: 'POST',
       body: JSON.stringify({ confirmed, feedback }),
+    })
+  },
+
+  async updateCanvas(
+    taskId: string,
+    canvas: CanvasArtifact,
+    clientId?: string,
+    deviceType?: string
+  ): Promise<{ success: boolean; canvas: CanvasArtifact; task: Task }> {
+    return fetchAPI<{ success: boolean; canvas: CanvasArtifact; task: Task }>(`/tasks/${taskId}/canvas`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        canvas,
+        client_id: clientId,
+        device_type: deviceType,
+      }),
     })
   },
 

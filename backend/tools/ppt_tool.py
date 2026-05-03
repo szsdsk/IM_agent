@@ -115,10 +115,26 @@ class PPTTool(BaseTool):
         slides: List[Dict],
         deck_spec: Dict = None,
     ) -> Dict[str, Any]:
-        self._log("info", f"Creating plain PPT for task {task_id}")
+        self._log("info", f"Creating PPT for task {task_id}")
         try:
             filename = f"{task_id}_{int(time.time() * 1000)}.pptx"
             filepath = os.path.join(self._output_dir, filename)
+
+            # 优先走视觉增强渲染器；失败才退回基础 python-pptx，避免交付链路中断。
+            visual_result = await self._try_render_visual_pptx(filename, title, slides, deck_spec)
+            if visual_result:
+                filepath = visual_result["filepath"]
+                return {
+                    "success": True,
+                    "slide_id": f"slide_{int(time.time() * 1000)}",
+                    "task_id": task_id,
+                    "title": visual_result["deck_spec"]["title"],
+                    "slides_count": visual_result["slides_count"],
+                    "deck_spec": visual_result["deck_spec"],
+                    "file_path": filepath,
+                    "download_url": self._download_url(filepath),
+                }
+
             payload_slides = self._normalize_slides_payload(slides, deck_spec)
             deck_title = (deck_spec or {}).get("title") or title or "Presentation"
             self._write_basic_pptx(filepath, deck_title, payload_slides)
@@ -144,6 +160,40 @@ class PPTTool(BaseTool):
 
     async def _render_with_deck_spec(self, deck_spec: Dict, task_id: str) -> Dict[str, Any]:
         return await self._create_pptx(task_id, (deck_spec or {}).get("title"), [], deck_spec)
+
+    async def _try_render_visual_pptx(
+        self,
+        filename: str,
+        title: Optional[str],
+        slides: Optional[List[Dict]],
+        deck_spec: Optional[Dict],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            from backend.services.deck_renderer import PptxGenRenderer
+            from backend.services.deck_spec import DeckSpec
+            from backend.services.visual_deck import normalize_visual_deck
+
+            if isinstance(deck_spec, dict):
+                deck = DeckSpec.from_dict(deck_spec)
+            else:
+                deck = DeckSpec(title=title or "Presentation")
+                for item in self._normalize_slides_payload(slides, None):
+                    deck.add_slide(title=item["title"], bullets=item.get("bullets", []), layout=item.get("layout", "content"))
+
+            if not deck.slides:
+                return None
+
+            normalized = normalize_visual_deck(deck)
+            rendered = await PptxGenRenderer(self._output_dir).render(normalized, filename)
+            if not rendered.get("success"):
+                return None
+            return {
+                **rendered,
+                "deck_spec": normalized.to_dict(),
+            }
+        except Exception as exc:
+            self._log("warning", f"Visual PPT renderer failed, falling back: {str(exc)}")
+            return None
 
     @staticmethod
     def _normalize_slides_payload(slides: Optional[List[Dict]], deck_spec: Optional[Dict]) -> List[Dict[str, Any]]:

@@ -476,7 +476,11 @@ export default function App() {
           </main>
 
           {selectedArtifact && (
-            <aside className="fixed inset-y-0 right-0 z-30 flex w-full flex-col border-l border-gray-200 bg-white shadow-2xl md:w-[520px] xl:static xl:z-auto xl:flex-none xl:shadow-none">
+            <aside
+              className={`fixed inset-y-0 right-0 z-30 flex w-full flex-col border-l border-gray-200 bg-white shadow-2xl xl:static xl:z-auto xl:flex-none xl:shadow-none ${
+                selectedArtifact === 'canvas' ? 'md:w-[720px] 2xl:w-[860px]' : 'md:w-[520px]'
+              }`}
+            >
               <div className="flex h-14 items-center justify-between border-b border-gray-200 px-4">
                 <div>
                   <p className="text-sm font-semibold text-gray-900">
