@@ -2,7 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../services/api'
 import { wsService } from '../services/websocket'
 import { useSessionStore } from '../store/useSessionStore'
-import type { PresentationScene } from '../types'
+import type { Message, PresentationScene } from '../types'
+
+const STEP_LABELS: Record<string, string> = {
+  receive_input: '接收输入',
+  parse_intent: '分析需求',
+  plan_workflow: '规划流程',
+  extract_tasks: '拆解任务',
+  generate_doc: '生成文稿',
+  generate_canvas: '生成画布',
+  generate_slides: '生成 PPT',
+  generate_rehearsal: '生成演讲稿',
+  prepare_delivery: '准备交付',
+  confirm_or_modify: '确认与修改',
+  deliver_result: '交付结果',
+}
 
 const sceneOptions: Array<{ value: PresentationScene; label: string }> = [
   { value: 'management_briefing', label: '管理层汇报' },
@@ -48,17 +62,14 @@ function isFeedbackLike(content: string): boolean {
 }
 
 function hasSlideReference(content: string): boolean {
-  return (
-    /第\s*[0-9一二两三四五六七八九十百]+\s*[页張张]/i.test(content) ||
-    /(?:slide|page|p)\s*#?\s*[0-9]+/i.test(content)
-  )
+  return /第\s*[0-9一二两三四五六七八九十百]+\s*[页张]/i.test(content) || /(?:slide|page|p)\s*#?\s*[0-9]+/i.test(content)
 }
 
 function isNewGenerationRequest(content: string): boolean {
   const text = content.toLowerCase()
   const createMarkers = ['生成', '创建', '制作', '做一个', '做一份', '新建', '写一个', '来一个', 'create', 'generate', 'make']
   const artifactMarkers = ['ppt', '演示', '幻灯片', 'deck', 'slides', '文档', '报告', '画布', '流程图']
-  const revisionMarkers = ['修改', '调整', '优化', '替换', '删掉', '删除', '补充', '改成', '更详细', '丰富', '具体一点']
+  const revisionMarkers = ['修改', '调整', '优化', '替换', '删除', '补充', '改成', '更详细', '丰富', '具体一点']
   return (
     createMarkers.some((marker) => text.includes(marker)) &&
     artifactMarkers.some((marker) => text.includes(marker)) &&
@@ -124,6 +135,17 @@ async function convertToPcm16k(blob: Blob): Promise<Blob> {
   }
 }
 
+function messageTime(message: Message): string {
+  const date = new Date(message.timestamp)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+function renderProgressLabel(step: string): string {
+  if (!step) return '处理中'
+  return STEP_LABELS[step] || step
+}
+
 export default function VoiceTranscriber() {
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
@@ -143,6 +165,8 @@ export default function VoiceTranscriber() {
     deviceType,
     task,
     status,
+    currentStep,
+    progress,
     setSessionId,
     setTask,
     setStatus,
@@ -183,7 +207,6 @@ export default function VoiceTranscriber() {
         setCurrentStep('confirm_or_modify')
         setProgress(0.1)
       } else {
-        // 新任务需要清空上一轮产物和进度，避免看起来像从旧流程中途继续。
         setTask(null)
         setDoc(null)
         setSlides(null)
@@ -269,6 +292,10 @@ export default function VoiceTranscriber() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages.length, status])
+
   const handleRecord = async () => {
     setError('')
     if (recording) {
@@ -323,74 +350,129 @@ export default function VoiceTranscriber() {
   }
 
   return (
-    <section className="flex h-[600px] flex-col rounded-lg border bg-white p-4 shadow-sm">
-      <h2 className="mb-3 text-sm font-semibold text-gray-800">消息</h2>
-
-      <div className="mb-3 flex-1 overflow-y-auto rounded-md border bg-gray-50 p-3 text-sm text-gray-700">
+    <section className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 py-6">
         {messages.length === 0 ? (
-          <p className="text-gray-400">输入文字或录一段语音开始任务。</p>
-        ) : (
-          messages.map((m) => (
-            <div
-              key={m.id}
-              className={`mb-2 rounded px-3 py-2 ${
-                m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'
-              }`}
-            >
-              {m.content}
+          <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center text-center">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gray-900 text-lg font-semibold text-white">
+              AI
             </div>
-          ))
+            <h2 className="text-2xl font-semibold text-gray-900">今天要一起完成什么？</h2>
+            <p className="mt-2 max-w-md text-sm leading-6 text-gray-500">
+              直接描述任务，或者录音转成文字。我会在当前对话里保留短期上下文，继续帮你生成文稿、PPT、画布和后续修改。
+            </p>
+          </div>
+        ) : (
+          <div className="mx-auto max-w-3xl space-y-5">
+            {messages.map((message) => {
+              const isUser = message.role === 'user'
+              return (
+                <div key={message.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[82%] ${isUser ? 'items-end' : 'items-start'} flex flex-col gap-1`}>
+                    <div
+                      className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 shadow-sm ${
+                        isUser
+                          ? 'rounded-br-md bg-gray-900 text-white'
+                          : message.role === 'system'
+                            ? 'rounded-bl-md border border-gray-200 bg-white text-gray-500'
+                            : 'rounded-bl-md border border-gray-200 bg-white text-gray-800'
+                      }`}
+                    >
+                      {message.content}
+                    </div>
+                    <span className="px-1 text-[11px] text-gray-400">{messageTime(message)}</span>
+                  </div>
+                </div>
+              )
+            })}
+            {status === 'running' && (
+              <div className="flex justify-start">
+                <div className="rounded-2xl rounded-bl-md border border-gray-200 bg-white px-4 py-3 text-sm text-gray-500 shadow-sm">
+                  正在处理...
+                </div>
+              </div>
+            )}
+            {(status === 'running' || status === 'completed' || status === 'failed') && (
+              <div className="flex justify-start">
+                <div className="w-full max-w-[82%] rounded-2xl rounded-bl-md border border-gray-200 bg-white px-4 py-3 shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-gray-800">执行进度</p>
+                    <p className="text-xs text-gray-500">
+                      {Math.max(0, Math.min(100, Math.round((progress || 0) * 100)))}%
+                    </p>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        status === 'failed' ? 'bg-red-500' : status === 'completed' ? 'bg-emerald-500' : 'bg-blue-500'
+                      }`}
+                      style={{ width: `${Math.max(5, Math.min(100, Math.round((progress || 0) * 100)))}%` }}
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-gray-600">
+                    当前步骤：{renderProgressLabel(currentStep)}
+                  </p>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
         )}
-        <div ref={messagesEndRef} />
       </div>
 
-      <label className="mb-1 text-xs font-medium text-gray-500">场景</label>
-      <select
-        value={presentationScene}
-        onChange={(e) => setPresentationScene(e.target.value as PresentationScene)}
-        disabled={sending || status === 'running'}
-        className="mb-2 rounded-md border px-3 py-2 text-sm text-gray-800 disabled:bg-gray-50"
-      >
-        {sceneOptions.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+      <div className="flex-none pb-4">
+        <div className="mx-auto max-w-3xl rounded-2xl border border-gray-200 bg-white p-3 shadow-lg shadow-gray-200/60">
+          {error && <p className="mb-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p>}
 
-      {error && <p className="mb-2 text-sm text-red-600">{error}</p>}
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                sendDraft()
+              }
+            }}
+            placeholder={transcribing ? '正在转写语音...' : '输入需求，Shift + Enter 换行'}
+            disabled={sending || transcribing}
+            className="max-h-44 min-h-[72px] w-full resize-none border-0 bg-transparent px-1 py-1 text-sm leading-6 text-gray-900 outline-none placeholder:text-gray-400 disabled:bg-transparent"
+          />
 
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault()
-            sendDraft()
-          }
-        }}
-        placeholder={transcribing ? '正在转写语音...' : '输入需求，或先录音转成文字'}
-        disabled={sending || transcribing}
-        className="h-24 w-full resize-none rounded-md border px-3 py-2 text-sm disabled:bg-gray-50"
-      />
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-2">
+            <div className="flex items-center gap-2">
+              <select
+                value={presentationScene}
+                onChange={(e) => setPresentationScene(e.target.value as PresentationScene)}
+                disabled={sending || status === 'running'}
+                className="h-8 rounded-md border border-gray-200 bg-gray-50 px-2 text-xs text-gray-700 outline-none disabled:opacity-60"
+              >
+                {sceneOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
 
-      <div className="mt-2 flex gap-2">
-        <button
-          onClick={handleRecord}
-          disabled={transcribing || sending}
-          className={`rounded-md px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-gray-300 ${
-            recording ? 'bg-red-600' : 'bg-gray-700'
-          }`}
-        >
-          {recording ? '停止录音' : transcribing ? '转写中...' : '语音'}
-        </button>
-        <button
-          onClick={sendDraft}
-          disabled={!draft.trim() || sending || transcribing || status === 'running'}
-          className="flex-1 rounded-md bg-blue-600 px-3 py-2 text-sm text-white disabled:cursor-not-allowed disabled:bg-gray-300"
-        >
-          {sending ? '发送中...' : '发送'}
-        </button>
+              <button
+                onClick={handleRecord}
+                disabled={transcribing || sending}
+                className={`h-8 rounded-md px-3 text-xs font-medium disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400 ${
+                  recording ? 'bg-red-600 text-white' : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {recording ? '停止录音' : transcribing ? '转写中...' : '语音'}
+              </button>
+            </div>
+
+            <button
+              onClick={sendDraft}
+              disabled={!draft.trim() || sending || transcribing || status === 'running'}
+              className="h-8 rounded-md bg-gray-900 px-4 text-xs font-medium text-white hover:bg-black disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400"
+            >
+              {sending ? '发送中...' : '发送'}
+            </button>
+          </div>
+        </div>
       </div>
     </section>
   )

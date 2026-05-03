@@ -76,7 +76,146 @@ class PptxGenRenderer:
         text = str(value).replace("\n", " ").strip()
         return text if len(text) <= limit else f"{text[:limit - 1]}..."
 
-    async def render(self, deck: DeckSpec, filename: str = None) -> Dict[str, Any]:
+    @staticmethod
+    def _remove_all_slides(prs) -> None:
+        """Remove all existing slides in a template deck, preserving masters/theme."""
+        slide_ids = prs.slides._sldIdLst  # python-pptx internal API
+        for slide_id in list(slide_ids):
+            rel_id = slide_id.rId
+            prs.part.drop_rel(rel_id)
+            slide_ids.remove(slide_id)
+
+    @staticmethod
+    def _pick_blank_layout(prs):
+        """Prefer blank layout when available; fallback to a safe first layout."""
+        if len(prs.slide_layouts) == 0:
+            raise RuntimeError("No slide layouts found in presentation template.")
+        # Most templates use index 6 as blank, but custom templates may differ.
+        if len(prs.slide_layouts) > 6:
+            return prs.slide_layouts[6]
+        return prs.slide_layouts[0]
+
+    @staticmethod
+    def _pick_template_layout(prs, for_cover: bool):
+        """Pick a clean template layout for deterministic text overlays."""
+        if len(prs.slide_layouts) == 0:
+            raise RuntimeError("No slide layouts found in presentation template.")
+        for layout in prs.slide_layouts:
+            name = str(getattr(layout, "name", "") or "").lower()
+            if "blank" in name or "空白" in name:
+                return layout
+        if len(prs.slide_layouts) > 6:
+            return prs.slide_layouts[6]
+        return prs.slide_layouts[0]
+
+    @staticmethod
+    def _slide_lines(slide: SlideSpec, limit: int = 8) -> list[str]:
+        lines = [str(item).strip() for item in (slide.bullets or []) if str(item).strip()]
+        if not lines and slide.content:
+            if isinstance(slide.content, str):
+                lines = [line.strip("-• ").strip() for line in slide.content.splitlines() if line.strip()]
+            elif isinstance(slide.content, dict):
+                lines = [str(value).strip() for value in slide.content.values() if str(value).strip()]
+            elif isinstance(slide.content, list):
+                lines = [str(value).strip() for value in slide.content if str(value).strip()]
+        return lines[:limit]
+
+    def _fill_template_slide(self, slide_obj, slide: SlideSpec, theme: ThemeConfig, page_number: int) -> None:
+        """Fill placeholders when present, then add visible content overlays."""
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Inches, Pt
+
+        title_shape = slide_obj.shapes.title
+        if title_shape and hasattr(title_shape, "text_frame"):
+            title_shape.text = self._safe_text(slide.title, 80)
+
+        content_placeholder = None
+        for shape in slide_obj.placeholders:
+            if not hasattr(shape, "text_frame"):
+                continue
+            if title_shape is not None and shape.shape_id == title_shape.shape_id:
+                continue
+            content_placeholder = shape
+            break
+
+        lines = self._slide_lines(slide, 10)
+        if content_placeholder and hasattr(content_placeholder, "text_frame"):
+            tf = content_placeholder.text_frame
+            tf.clear()
+            if lines:
+                tf.paragraphs[0].text = self._safe_text(lines[0], 160)
+                for item in lines[1:]:
+                    paragraph = tf.add_paragraph()
+                    paragraph.text = self._safe_text(item, 160)
+                    paragraph.level = 0
+            elif slide.content:
+                tf.paragraphs[0].text = self._safe_text(slide.content, 400)
+
+        if slide.speaker_notes:
+            slide_obj.notes_slide.notes_text_frame.text = slide.speaker_notes
+
+        # Template samples can live in masters/layouts, so draw generated content
+        # as the topmost layer to make the deck visibly use the current task data.
+        title_panel = slide_obj.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(0.72),
+            Inches(0.58),
+            Inches(11.9),
+            Inches(1.0),
+        )
+        title_panel.fill.solid()
+        title_panel.fill.fore_color.rgb = self._hex_to_rgb("#050505")
+        title_panel.line.fill.background()
+
+        title_box = slide_obj.shapes.add_textbox(Inches(0.95), Inches(0.72), Inches(11.35), Inches(0.68))
+        title_frame = title_box.text_frame
+        title_frame.clear()
+        title_paragraph = title_frame.paragraphs[0]
+        title_paragraph.text = self._safe_text(slide.title, 72)
+        title_paragraph.font.name = getattr(theme, "font_title", None) or theme.font_body
+        title_paragraph.font.size = Pt(30 if page_number == 1 else 26)
+        title_paragraph.font.bold = True
+        title_paragraph.font.color.rgb = self._hex_to_rgb("#FFFFFF")
+        title_paragraph.alignment = PP_ALIGN.LEFT
+
+        body_panel = slide_obj.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(0.85),
+            Inches(1.92),
+            Inches(11.65),
+            Inches(4.65),
+        )
+        body_panel.fill.solid()
+        body_panel.fill.fore_color.rgb = self._hex_to_rgb("#111111")
+        body_panel.line.color.rgb = self._hex_to_rgb("#3A3A3A")
+
+        body_box = slide_obj.shapes.add_textbox(Inches(1.16), Inches(2.18), Inches(11.05), Inches(4.18))
+        body_frame = body_box.text_frame
+        body_frame.clear()
+        body_frame.word_wrap = True
+        lines = self._slide_lines(slide, 8)
+        if not lines and slide.content:
+            lines = [self._safe_text(slide.content, 220)]
+        if not lines:
+            lines = ["内容生成中"]
+        for index, item in enumerate(lines):
+            paragraph = body_frame.paragraphs[0] if index == 0 else body_frame.add_paragraph()
+            paragraph.text = item if page_number == 1 and index == 0 else f"• {item}"
+            paragraph.font.name = theme.font_body
+            paragraph.font.size = Pt(18 if index == 0 else 15)
+            paragraph.font.bold = index == 0 and page_number == 1
+            paragraph.font.color.rgb = self._hex_to_rgb("#F7F7F7")
+            paragraph.space_after = Pt(8)
+
+        footer = slide_obj.shapes.add_textbox(Inches(11.82), Inches(6.88), Inches(0.7), Inches(0.24))
+        footer_p = footer.text_frame.paragraphs[0]
+        footer_p.text = str(page_number)
+        footer_p.font.size = Pt(9)
+        footer_p.font.color.rgb = self._hex_to_rgb("#D8D8D8")
+        footer_p.alignment = PP_ALIGN.RIGHT
+
+    async def render(self, deck: DeckSpec, filename: str = None, template_path: str = None) -> Dict[str, Any]:
         if filename is None:
             filename = f"{deck.title.replace(' ', '_')}.pptx"
         filepath = os.path.join(self.output_dir, filename)
@@ -89,14 +228,44 @@ class PptxGenRenderer:
             return {"success": False, "error": "python-pptx not installed"}
 
         theme = ThemeConfig.get_theme(deck.theme)
-        prs = Presentation()
+        use_template_mode = bool(template_path and os.path.isfile(template_path))
+        if use_template_mode:
+            prs = Presentation(template_path)
+            self._remove_all_slides(prs)
+            logger.info("Loaded PPT template and cleared existing slides: %s", template_path)
+        else:
+            prs = Presentation()
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
 
-        for slide_spec in deck.slides:
-            self._add_slide(prs, slide_spec, theme)
+        if use_template_mode:
+            for index, slide_spec in enumerate(deck.slides):
+                layout = self._pick_template_layout(prs, for_cover=index == 0)
+                slide_obj = prs.slides.add_slide(layout)
+                self._fill_template_slide(slide_obj, slide_spec, theme, index + 1)
+                logger.info(
+                    "Template slide filled: idx=%s, title=%s, bullets=%s, preview=%s",
+                    index,
+                    self._safe_text(slide_spec.title, 40),
+                    len(self._slide_lines(slide_spec)),
+                    self._safe_text(" | ".join(self._slide_lines(slide_spec, 2)), 90),
+                )
+            logger.info("Rendered in template placeholder mode.")
+        else:
+            layout = self._pick_blank_layout(prs)
+            for slide_spec in deck.slides:
+                self._add_slide(prs, slide_spec, theme, layout)
+
+        logger.info(
+            "Rendered PPT with %s content slides (title=%s, template=%s)",
+            len(deck.slides),
+            deck.title,
+            template_path if template_path else "default",
+        )
+        logger.info("PPT slide count before save: %s", len(prs.slides))
 
         prs.save(filepath)
+        logger.info("PPT slide count after save: %s", len(prs.slides))
         return {
             "success": True,
             "filepath": filepath,
@@ -104,8 +273,7 @@ class PptxGenRenderer:
             "title": deck.title,
         }
 
-    def _add_slide(self, prs, slide: SlideSpec, theme: ThemeConfig) -> None:
-        layout = prs.slide_layouts[6]
+    def _add_slide(self, prs, slide: SlideSpec, theme: ThemeConfig, layout) -> None:
         slide_obj = prs.slides.add_slide(layout)
         self._apply_slide_background(slide_obj, theme, slide.index + 1)
 

@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Set
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.agent.orchestrator import agent_orchestrator
 from backend.config import settings
@@ -241,6 +241,93 @@ def _event_to_message(event: Event, session_id: str) -> Optional[MessageResponse
         content=content,
         timestamp=event.created_at,
     )
+
+
+def _compact_memory_text(value: Any, limit: int = 700) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _task_memory_summary(task: Task) -> Optional[Dict[str, str]]:
+    if not isinstance(task.result_json, dict):
+        return None
+    result = task.result_json.get("result")
+    if not isinstance(result, dict):
+        return None
+
+    lines = [f"Previous task: {task.intent}"]
+    doc = result.get("document") or result.get("doc") or {}
+    if isinstance(doc, dict) and (doc.get("title") or doc.get("preview") or doc.get("content")):
+        lines.append(f"Document: {doc.get('title') or 'untitled'}")
+        preview = doc.get("preview") or doc.get("content")
+        if preview:
+            lines.append(f"Document preview: {_compact_memory_text(preview, 500)}")
+
+    slides = result.get("slides") or result.get("deck") or {}
+    if isinstance(slides, dict) and (slides.get("title") or slides.get("slides")):
+        lines.append(f"Slides: {slides.get('title') or 'untitled'}")
+        slide_titles = [
+            str(slide.get("title") or "").strip()
+            for slide in (slides.get("slides") or [])[:8]
+            if isinstance(slide, dict) and str(slide.get("title") or "").strip()
+        ]
+        if slide_titles:
+            lines.append("Slide titles: " + " / ".join(slide_titles))
+
+    canvas = result.get("canvas") or {}
+    if isinstance(canvas, dict) and canvas.get("title"):
+        lines.append(f"Canvas: {canvas.get('title')}")
+
+    if len(lines) <= 1:
+        return None
+    return {
+        "role": "system",
+        "content": "\n".join(lines),
+        "source": "short_term_memory",
+    }
+
+
+async def _build_short_term_memory(
+    db: AsyncSession,
+    session_id: str,
+    message_limit: int = 12,
+    task_limit: int = 3,
+) -> list[Dict[str, str]]:
+    """Build lightweight GPT-style window memory from this session."""
+    task_result = await db.execute(
+        select(Task)
+        .where(Task.session_id == session_id)
+        .order_by(Task.updated_at.desc(), Task.created_at.desc())
+        .limit(task_limit)
+    )
+    task_summaries = [
+        summary
+        for summary in (_task_memory_summary(task) for task in reversed(task_result.scalars().all()))
+        if summary
+    ]
+
+    event_result = await db.execute(
+        select(Event)
+        .where(Event.session_id == session_id, Event.event_type == "message.created")
+        .order_by(Event.created_at.desc())
+        .limit(message_limit)
+    )
+    chat_messages: list[Dict[str, str]] = []
+    for event in reversed(event_result.scalars().all()):
+        payload = event.payload or {}
+        content = _compact_memory_text(payload.get("content"), 900)
+        if not content:
+            continue
+        role = str(payload.get("role") or "user")
+        chat_messages.append({
+            "role": role if role in {"user", "assistant", "system"} else "user",
+            "content": content,
+            "source": "session_message",
+        })
+
+    return (task_summaries + chat_messages)[-24:]
 
 
 def _task_delivery_confirmed(task: Task) -> bool:
@@ -767,6 +854,7 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             db.add(session)
             await db.commit()
             await db.refresh(session)
+        context_messages = await _build_short_term_memory(db, session.id)
 
         feedback_target = await _find_feedback_target(
             db=db,
@@ -802,6 +890,7 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
                 base_result=await _build_feedback_base_result(db, feedback_target),
                 user_id=message.get("user_id"),
                 room_id=message.get("chat_id"),
+                context_messages=context_messages,
                 ws_sender=None,
             )
             feedback_target.result_json = {
@@ -846,6 +935,7 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             intent=text,
             user_id=message.get("user_id"),
             room_id=message.get("chat_id"),
+            context_messages=context_messages,
             ws_sender=None,
         )
 
@@ -1163,6 +1253,29 @@ async def get_session(session_id: str, db: AsyncSession = Depends(get_db)):
     return session
 
 
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Session).where(Session.id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    task_ids_result = await db.execute(select(Task.id).where(Task.session_id == session_id))
+    task_ids = [row[0] for row in task_ids_result.all()]
+
+    if task_ids:
+        await db.execute(delete(Document).where(Document.task_id.in_(task_ids)))
+        await db.execute(delete(Slide).where(Slide.task_id.in_(task_ids)))
+        await db.execute(delete(Event).where(or_(Event.session_id == session_id, Event.task_id.in_(task_ids))))
+        await db.execute(delete(Task).where(Task.id.in_(task_ids)))
+    else:
+        await db.execute(delete(Event).where(Event.session_id == session_id))
+
+    await db.execute(delete(Session).where(Session.id == session_id))
+    await db.commit()
+    return {"success": True, "session_id": session_id}
+
+
 @router.get("/sessions/{session_id}/state")
 async def get_session_state(session_id: str, db: AsyncSession = Depends(get_db)):
     """返回完整会话快照，用于多端首次进入、刷新和 WebSocket 重连恢复。"""
@@ -1195,6 +1308,7 @@ async def send_message(
     session = session_result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    context_messages = await _build_short_term_memory(db, session_id)
 
     feedback_target = await _find_feedback_target(
         db=db,
@@ -1222,6 +1336,7 @@ async def send_message(
                 if isinstance(feedback_target.result_json, dict)
                 else None
             ),
+            context_messages=context_messages,
             ws_sender=None,
         )
         await _persist_task_outputs(db, feedback_target, state)
@@ -1254,6 +1369,7 @@ async def send_message(
         user_id=request.user_id,
         room_id=request.room_id,
         presentation_scene=request.presentation_scene,
+        context_messages=context_messages,
         ws_sender=None,
     )
 
@@ -1436,6 +1552,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     result = await session_result.execute(select(Session).where(Session.id == session_id))
                     session = result.scalar_one_or_none()
                     if session:
+                        context_messages = await _build_short_term_memory(session_result, session_id)
                         feedback_target = await _find_feedback_target(
                             db=session_result,
                             session_id=session_id,
@@ -1471,6 +1588,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 base_result=await _build_feedback_base_result(session_result, feedback_target),
                                 user_id=request.user_id,
                                 room_id=request.room_id,
+                                context_messages=context_messages,
                                 ws_sender=None,
                             )
                             await _persist_task_outputs(session_result, feedback_target, state)
@@ -1509,6 +1627,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             user_id=request.user_id,
                             room_id=request.room_id,
                             presentation_scene=request.presentation_scene,
+                            context_messages=context_messages,
                             ws_sender=None,
                         )
 

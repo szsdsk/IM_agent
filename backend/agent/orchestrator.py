@@ -165,12 +165,14 @@ class AgentOrchestrator:
         user_id: Optional[str] = None,
         room_id: Optional[str] = None,
         presentation_scene: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, Any]]] = None,
         ws_sender: Callable = None,
     ) -> AgentState:
-        context_messages: List[Dict[str, Any]] = []
+        merged_context_messages: List[Dict[str, Any]] = list(context_messages or [])
         if room_id and settings.IM_PROVIDER == "rocket_chat":
             try:
-                context_messages = await fetch_im_context(room_id, limit=20)
+                rocket_context = await fetch_im_context(room_id, limit=20)
+                merged_context_messages.extend(rocket_context)
             except Exception as exc:
                 logger.warning("Failed to fetch Rocket.Chat context for room %s: %s", room_id, str(exc))
 
@@ -180,7 +182,7 @@ class AgentOrchestrator:
             intent,
             user_id=user_id,
             room_id=room_id,
-            context_messages=context_messages,
+            context_messages=merged_context_messages[-24:],
         )
         state["presentation_scene"] = presentation_scene
 
@@ -406,6 +408,17 @@ class AgentOrchestrator:
                     "qa_count": len(state["slides_content"].get("qa", [])),
                 }
         return artifacts
+
+    @staticmethod
+    def _format_recent_context(messages: Optional[List[Dict[str, Any]]], limit: int = 10) -> str:
+        lines: List[str] = []
+        for message in (messages or [])[-limit:]:
+            content = str(message.get("content") or "").strip()
+            if not content:
+                continue
+            role = str(message.get("role") or "user")
+            lines.append(f"{role}: {content[:900]}")
+        return "\n".join(lines)
 
     def _task_result_payload(self, state: AgentState, task: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -673,6 +686,7 @@ class AgentOrchestrator:
         base_result: Dict[str, Any],
         user_id: Optional[str] = None,
         room_id: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, Any]]] = None,
         ws_sender: Callable = None,
     ) -> AgentState:
         logger.info("Handling feedback for task %s: %s", task_id, feedback)
@@ -685,11 +699,17 @@ class AgentOrchestrator:
             intent=feedback,
             user_id=user_id,
             room_id=room_id,
-            context_messages=[],
+            context_messages=list(context_messages or [])[-24:],
         )
         state["status"] = "running"
         state["messages"] = []
         state["progress"] = 0.0
+        recent_context = self._format_recent_context(state.get("context_messages"))
+        feedback_for_generation = (
+            f"{feedback}\n\n# Recent session context\n{recent_context}"
+            if recent_context
+            else feedback
+        )
 
         async def publish(step: str, progress: float, message: str) -> None:
             state["current_step"] = step
@@ -723,7 +743,7 @@ class AgentOrchestrator:
                 revised_doc = await revise_doc_content(
                     title=title,
                     original_content=base_doc.get("content") or base_doc.get("preview") or "",
-                    feedback=feedback,
+                    feedback=feedback_for_generation,
                 )
                 doc_result = await ToolFactory.invoke_tool(
                     "DocTool",
@@ -767,7 +787,7 @@ class AgentOrchestrator:
                         revision = await revise_targeted_slides(
                             title=title,
                             original_slides=slides,
-                            feedback=feedback,
+                            feedback=feedback_for_generation,
                             target_slide_indexes=target_indexes,
                             audience=base_slides.get("audience") or "management",
                             doc_content=doc_content,
@@ -790,7 +810,7 @@ class AgentOrchestrator:
                         revised_spec = await revise_deck_spec(
                             title=title,
                             original_slides=slides,
-                            feedback=feedback,
+                            feedback=feedback_for_generation,
                             audience=base_slides.get("audience") or "management",
                             doc_content=doc_content,
                         )

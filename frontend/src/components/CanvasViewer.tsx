@@ -1,11 +1,44 @@
 import { useSessionStore } from '../store/useSessionStore'
 
+type ArtifactKind = 'doc' | 'slides' | 'canvas'
+
 interface CanvasViewerProps {
   className?: string
+  onOpenArtifact?: (artifact: ArtifactKind) => void
 }
 
-export default function CanvasViewer({ className = '' }: CanvasViewerProps) {
+function normalizeText(value: unknown): string {
+  return String(value || '').trim().toLowerCase()
+}
+
+function detectArtifactKind(node: Record<string, any>): ArtifactKind | null {
+  const haystack = [
+    node.type,
+    node.text,
+    node.label,
+    node.name,
+    node.title,
+    node.id,
+  ]
+    .map(normalizeText)
+    .join(' ')
+
+  if (/(文稿|文档|doc|document|prd|report)/.test(haystack)) return 'doc'
+  if (/(ppt|slides|slide|deck|演示|幻灯片)/.test(haystack)) return 'slides'
+  if (/(画布|canvas|whiteboard|白板)/.test(haystack)) return 'canvas'
+  return null
+}
+
+function artifactLabel(kind: ArtifactKind): string {
+  if (kind === 'doc') return '文稿产物'
+  if (kind === 'slides') return 'PPT 产物'
+  return '画布产物'
+}
+
+export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasViewerProps) {
   const canvas = useSessionStore((state) => state.canvas)
+  const doc = useSessionStore((state) => state.doc)
+  const slides = useSessionStore((state) => state.slides)
 
   if (!canvas) {
     return (
@@ -49,10 +82,46 @@ export default function CanvasViewer({ className = '' }: CanvasViewerProps) {
           <div className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               {nodes.map((node, index) => (
-                <div key={node.id || index} className="rounded-lg border border-blue-100 bg-blue-50 p-3">
-                  <p className="text-xs text-blue-500">{node.type || 'node'}</p>
-                  <p className="font-medium text-gray-800">{node.text || node.id}</p>
-                </div>
+                (() => {
+                  const artifactKind = detectArtifactKind(node)
+                  const isAvailable =
+                    artifactKind === 'doc'
+                      ? Boolean(doc)
+                      : artifactKind === 'slides'
+                        ? Boolean(slides)
+                        : artifactKind === 'canvas'
+                          ? Boolean(canvas)
+                          : false
+
+                  if (artifactKind) {
+                    return (
+                      <button
+                        key={node.id || index}
+                        type="button"
+                        onClick={() => onOpenArtifact?.(artifactKind)}
+                        disabled={!isAvailable}
+                        className={`rounded-lg border p-3 text-left transition ${
+                          isAvailable
+                            ? 'border-emerald-200 bg-emerald-50 hover:border-emerald-300 hover:shadow-sm'
+                            : 'cursor-not-allowed border-gray-200 bg-gray-50 opacity-70'
+                        }`}
+                      >
+                        <p className="text-xs text-emerald-600">{artifactLabel(artifactKind)}</p>
+                        <p className="font-medium text-gray-800">{node.text || node.id}</p>
+                        <p className="mt-2 text-xs text-gray-500">
+                          {isAvailable ? '点击打开真实产物预览' : '产物尚未生成'}
+                        </p>
+                      </button>
+                    )
+                  }
+
+                  return (
+                    <div key={node.id || index} className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+                      <p className="text-xs text-blue-500">{node.type || 'node'}</p>
+                      <p className="font-medium text-gray-800">{node.text || node.id}</p>
+                    </div>
+                  )
+                })()
               ))}
             </div>
             {edges.length > 0 && (

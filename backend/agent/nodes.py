@@ -4,6 +4,7 @@ Agent workflow nodes.
 Each node receives and returns AgentState so LangGraph can orchestrate the
 workflow while the API layer keeps its existing response contract.
 """
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict
@@ -226,6 +227,45 @@ def _normalize_slide_for_frontend(slide: Dict[str, Any], index: int) -> Dict[str
         "content": content or "",
         "bullets": bullets,
     }
+
+
+def _compact_deck_for_rehearsal(deck_spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep rehearsal prompts small so optional speaker notes cannot block deck delivery."""
+    slides = []
+    for index, slide in enumerate(deck_spec.get("slides", [])[:12]):
+        if not isinstance(slide, dict):
+            continue
+        content = get_slide_text_for_prompt(slide)
+        slides.append({
+            "index": slide.get("index", index),
+            "title": slide.get("title", f"Slide {index + 1}"),
+            "layout": slide.get("layout"),
+            "content": content[:700],
+            "bullets": [str(item)[:180] for item in (slide.get("bullets") or [])[:6]],
+        })
+    return {
+        "title": deck_spec.get("title"),
+        "audience": deck_spec.get("audience"),
+        "duration_minutes": deck_spec.get("duration_minutes"),
+        "slides": slides,
+    }
+
+
+def get_slide_text_for_prompt(slide: Dict[str, Any]) -> str:
+    content = slide.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(item) for item in content)
+    if isinstance(content, dict):
+        parts = []
+        for value in content.values():
+            if isinstance(value, list):
+                parts.extend(str(item) for item in value)
+            elif value is not None:
+                parts.append(str(value))
+        return "\n".join(parts)
+    return "\n".join(str(item) for item in (slide.get("bullets") or []))
 
 
 def _touch(state: AgentState, step: str, progress: float | None = None) -> AgentState:
@@ -540,8 +580,6 @@ async def generate_slides(state: AgentState) -> AgentState:
         metadata.setdefault("feedback_history", [])
         metadata.setdefault("versions", [])
         deck_spec["metadata"] = metadata
-        rehearsal = await generate_rehearsal(deck_spec)
-        qa = await generate_qa(deck_spec, rehearsal)
         state["deck_spec"] = deck_spec
 
         raw_slides = deck_spec.get("slides", [])
@@ -570,6 +608,24 @@ async def generate_slides(state: AgentState) -> AgentState:
                 _normalize_slide_for_frontend(slide, index)
                 for index, slide in enumerate(final_deck_spec.get("slides", raw_slides))
             ]
+
+            rehearsal = {
+                "slides": [
+                    {"slide_index": index, "speaker_notes": "", "duration_seconds": 60, "qa_questions": []}
+                    for index in range(len(final_slides))
+                ],
+                "total_duration_minutes": max(len(final_slides), 1),
+                "tips": [],
+            }
+            qa_items = []
+            try:
+                compact_deck = _compact_deck_for_rehearsal({**final_deck_spec, "slides": final_slides})
+                rehearsal = await asyncio.wait_for(generate_rehearsal(compact_deck), timeout=45)
+                qa = await asyncio.wait_for(generate_qa(compact_deck, rehearsal), timeout=45)
+                qa_items = qa.get("items", [])
+            except Exception as exc:
+                logger.warning("Optional rehearsal/Q&A generation skipped for task %s: %s", state["task_id"], str(exc))
+
             state["slides_content"] = {
                 "slide_id": result.get("slide_id"),
                 "title": final_deck_spec.get("title"),
@@ -581,7 +637,7 @@ async def generate_slides(state: AgentState) -> AgentState:
                 "duration_minutes": final_deck_spec.get("duration_minutes"),
                 "metadata": final_metadata,
                 "rehearsal": rehearsal,
-                "qa": qa.get("items", []),
+                "qa": qa_items,
                 "feedback_history": final_metadata.get("feedback_history", []),
             }
             state["deck_spec"] = final_deck_spec

@@ -30,6 +30,12 @@ export const api = {
     return fetchAPI<Session>(`/sessions/${sessionId}`)
   },
 
+  async deleteSession(sessionId: string): Promise<{ success: boolean; session_id: string }> {
+    return fetchAPI<{ success: boolean; session_id: string }>(`/sessions/${sessionId}`, {
+      method: 'DELETE',
+    })
+  },
+
   async getSessionMessages(sessionId: string): Promise<Message[]> {
     return fetchAPI<Message[]>(`/sessions/${sessionId}/messages`)
   },
