@@ -83,6 +83,40 @@ class VisualDeckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["deck_spec"]["slides"][0]["layout"], "hero")
         self.assertEqual(result["deck_spec"]["slides"][1]["layout"], "metrics")
 
+    def test_chart_layout_is_valid(self):
+        from backend.services.deck_spec import DeckSpec, validate_deck_spec
+        deck = DeckSpec(title="Chart Test")
+        deck.add_slide(title="Quarterly Revenue", layout="chart", chart={
+            "type": "bar", "title": "Revenue",
+            "categories": ["Q1", "Q2", "Q3", "Q4"],
+            "series": [{"name": "Revenue", "values": [100, 150, 180, 210]}],
+        })
+        errors = validate_deck_spec(deck)
+        self.assertEqual(errors, [])
+
+    async def test_renderer_supports_chart_layout(self):
+        import os, tempfile
+        from backend.services.deck_spec import DeckSpec
+        from backend.services.deck_renderer import PptxGenRenderer
+
+        deck = DeckSpec(title="Chart Rendering Test", theme="business_blue")
+        deck.add_slide(title="Revenue", layout="chart", chart={
+            "type": "bar", "title": "Quarterly Revenue",
+            "categories": ["Q1", "Q2", "Q3", "Q4"],
+            "series": [{"name": "2025", "values": [120, 150, 180, 210]}],
+        })
+        deck.add_slide(title="Market Share", layout="chart", chart={
+            "type": "pie", "title": "Market Share",
+            "categories": ["Product A", "Product B", "Product C"],
+            "series": [{"name": "Share", "values": [45, 35, 20]}],
+        })
+        with tempfile.TemporaryDirectory() as tmpdir:
+            renderer = PptxGenRenderer(tmpdir)
+            result = await renderer.render(deck, "chart_test.pptx")
+            self.assertTrue(result["success"])
+            self.assertEqual(result["slides_count"], 2)
+            self.assertTrue(os.path.exists(result["filepath"]))
+
 
 if __name__ == "__main__":
     unittest.main()
