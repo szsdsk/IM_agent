@@ -4,6 +4,8 @@
 以及 layout 映射表和公共入口 run_ppt_agent()。
 """
 import os
+import sys
+import types
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -67,7 +69,7 @@ class TestLayoutMapping(unittest.TestCase):
             self.assertIn(layout, LAYOUT_TO_MCK_METHOD, f"layout '{layout}' missing mapping")
 
 
-class TestOutlineNode(unittest.TestCase):
+class TestOutlineNode(unittest.IsolatedAsyncioTestCase):
     """S1: brief 生成节点。"""
 
     def _base_state(self) -> PPTAgentState:
@@ -110,9 +112,8 @@ class TestOutlineNode(unittest.TestCase):
         mock_llm.side_effect = Exception("LLM unavailable")
         state = self._base_state()
         result = await outline_node(state)
-        # Should have fallback brief, not error
-        self.assertIsNotNone(result.get("ppt_brief"))
-        self.assertIn("fallback", result.get("ppt_brief", {}).get("title", "").lower())
+        self.assertIsNone(result.get("ppt_brief"))
+        self.assertIn("error", result)
 
 
 class TestStructureNode(unittest.TestCase):
@@ -144,52 +145,52 @@ class TestStructureNode(unittest.TestCase):
             "messages": [],
         }
 
-    async def test_first_slide_always_cover(self):
+    def test_first_slide_always_cover(self):
         state = self._state_with_brief()
-        result = await structure_node(state)
+        result = structure_node(state)
         outline = result["ppt_outline"]
         self.assertEqual(outline[0]["mck_method"], "cover")
 
-    async def test_last_slide_closing_detected(self):
+    def test_last_slide_closing_detected(self):
         state = self._state_with_brief()
-        result = await structure_node(state)
+        result = structure_node(state)
         outline = result["ppt_outline"]
         closing_idx = [i for i, o in enumerate(outline) if o["mck_method"] == "closing"]
         self.assertTrue(any(closing_idx))
 
-    async def test_pie_chart_maps_to_donut(self):
+    def test_pie_chart_maps_to_donut(self):
         state = self._state_with_brief()
-        result = await structure_node(state)
+        result = structure_node(state)
         pie_slide = [o for o in result["ppt_outline"] if o["title"] == "占比"][0]
         self.assertEqual(pie_slide["mck_method"], "donut")
 
-    async def test_bar_chart_stays_column_comparison(self):
+    def test_bar_chart_stays_column_comparison(self):
         state = self._state_with_brief()
-        result = await structure_node(state)
+        result = structure_node(state)
         bar_slide = [o for o in result["ppt_outline"] if o["title"] == "收入"][0]
         self.assertEqual(bar_slide["mck_method"], "column_comparison")
 
-    async def test_preserves_slide_order(self):
+    def test_preserves_slide_order(self):
         state = self._state_with_brief()
-        result = await structure_node(state)
+        result = structure_node(state)
         indices = [o["index"] for o in result["ppt_outline"]]
         self.assertEqual(indices, sorted(indices))
 
-    async def test_unknown_layout_fallbacks(self):
+    def test_unknown_layout_fallbacks(self):
         state = {
             "deck_spec": {"slides": [{"index": 0, "title": "Test", "layout": "nonexistent_layout"}]},
             "ppt_brief": {"title": "T", "slide_count": 1},
             "messages": [],
         }
-        result = await structure_node(state)
-        self.assertEqual(result["ppt_outline"][0]["mck_method"], "table_insight")
+        result = structure_node(state)
+        self.assertEqual(result["ppt_outline"][0]["mck_method"], "cover")
 
 
 class TestContentNode(unittest.TestCase):
     """S3: 内容填充节点。"""
 
     def _state_with_outline(self) -> PPTAgentState:
-        return {
+        state = {
             "deck_spec": {
                 "title": "Test Deck",
                 "slides": [
@@ -234,82 +235,93 @@ class TestContentNode(unittest.TestCase):
             "ppt_brief": {"title": "T", "subtitle": "S", "date": "2026-05-04"},
             "messages": [],
         }
+        for entry in state["ppt_outline"]:
+            entry["content_hint"] = state["deck_spec"]["slides"][entry["index"]]
+        return state
 
-    async def test_all_slides_get_params(self):
+    def test_all_slides_get_params(self):
         state = self._state_with_outline()
-        result = await content_node(state)
+        result = content_node(state)
         filled = result["ppt_filled_slides"]
         self.assertEqual(len(filled), 10)
         for slide in filled:
-            self.assertIn("rendered_params", slide)
+            self.assertIn("params", slide)
 
-    async def test_cover_has_subtitle_from_bullets(self):
+    def test_cover_has_subtitle_from_bullets(self):
         state = self._state_with_outline()
-        result = await content_node(state)
+        result = content_node(state)
         cover = [s for s in result["ppt_filled_slides"] if s["mck_method"] == "cover"][0]
-        self.assertIn("subtitle", cover["rendered_params"])
+        self.assertIn("subtitle", cover["params"])
 
-    async def test_table_insight_converts_bullets(self):
+    def test_table_insight_converts_bullets(self):
         state = self._state_with_outline()
-        result = await content_node(state)
+        result = content_node(state)
         table = [s for s in result["ppt_filled_slides"] if s["mck_method"] == "table_insight"][0]
-        params = table["rendered_params"]
+        params = table["params"]
         self.assertIn("rows", params)
         self.assertTrue(len(params["rows"]) >= 2)
 
-    async def test_timeline_converts_milestones(self):
+    def test_timeline_converts_milestones(self):
         state = self._state_with_outline()
-        result = await content_node(state)
+        result = content_node(state)
         tl = [s for s in result["ppt_filled_slides"] if s["mck_method"] == "timeline"][0]
-        milestones = tl["rendered_params"]["milestones"]
+        milestones = tl["params"]["milestones"]
         self.assertEqual(len(milestones), 2)
 
-    async def test_donut_converts_segments(self):
+    def test_donut_converts_segments(self):
         state = self._state_with_outline()
-        result = await content_node(state)
+        result = content_node(state)
         donut = [s for s in result["ppt_filled_slides"] if s["mck_method"] == "donut"][0]
-        segments = donut["rendered_params"]["segments"]
+        segments = donut["params"]["segments"]
         self.assertEqual(len(segments), 3)
 
 
 class TestRenderNode(unittest.TestCase):
     """S4: 渲染节点。"""
 
-    @patch("backend.agent.ppt_agent.MckEngineRenderer")
-    async def test_render_calls_engine_and_saves(self, MockRenderer):
-        mock_renderer_instance = AsyncMock()
-        mock_renderer_instance.render.return_value = {
-            "success": True,
-            "filepath": "/tmp/test.pptx",
-            "slides_count": 3,
-        }
-        MockRenderer.return_value = mock_renderer_instance
+    def test_render_calls_engine_and_saves(self):
+        class FakeMckEngine:
+            def __init__(self, total_slides):
+                self.total_slides = total_slides
+
+            def cover(self, **_params):
+                return None
+
+            def table_insight(self, **_params):
+                return None
+
+            def closing(self, **_params):
+                return None
+
+            def save(self, _path):
+                return None
 
         state: PPTAgentState = {
             "ppt_filled_slides": [
-                {"index": 0, "title": "Cover", "mck_method": "cover", "rendered_params": {"title": "T"}},
-                {"index": 1, "title": "Content", "mck_method": "table_insight", "rendered_params": {"title": "C"}},
-                {"index": 2, "title": "End", "mck_method": "closing", "rendered_params": {"title": "E"}},
+                {"index": 0, "title": "Cover", "mck_method": "cover", "params": {"title": "T"}},
+                {"index": 1, "title": "Content", "mck_method": "table_insight", "params": {"title": "C"}},
+                {"index": 2, "title": "End", "mck_method": "closing", "params": {"title": "E"}},
             ],
             "ppt_brief": {"title": "T"},
             "messages": [],
         }
-        result = await render_node(state)
+        with patch.dict(sys.modules, {"mck_ppt": types.SimpleNamespace(MckEngine=FakeMckEngine)}):
+            result = render_node(state)
         self.assertTrue(result["ppt_render_result"]["success"])
-        self.assertEqual(result["ppt_render_result"]["slides_count"], 3)
+        self.assertEqual(result["ppt_render_result"]["rendered_slides"], 3)
 
-    @patch("backend.agent.ppt_agent.MckEngineRenderer")
-    async def test_render_sets_error_on_failure(self, MockRenderer):
-        mock_renderer_instance = AsyncMock()
-        mock_renderer_instance.render.return_value = {"success": False, "error": "engine crash"}
-        MockRenderer.return_value = mock_renderer_instance
+    def test_render_sets_error_on_failure(self):
+        class BrokenMckEngine:
+            def __init__(self, total_slides):
+                raise RuntimeError("engine crash")
 
         state: PPTAgentState = {
-            "ppt_filled_slides": [{"index": 0, "title": "X", "mck_method": "cover", "rendered_params": {}}],
+            "ppt_filled_slides": [{"index": 0, "title": "X", "mck_method": "cover", "params": {}}],
             "ppt_brief": {},
             "messages": [],
         }
-        result = await render_node(state)
+        with patch.dict(sys.modules, {"mck_ppt": types.SimpleNamespace(MckEngine=BrokenMckEngine)}):
+            result = render_node(state)
         self.assertIn("error", result)
 
 

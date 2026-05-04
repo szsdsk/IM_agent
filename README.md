@@ -2,7 +2,7 @@
 
 Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它以网页对话和飞书 Bot 为入口，把用户的自然语言或语音需求拆解成可执行工作流，并自动完成需求理解、任务规划、文档生成、PPT 生成、飞书交付、反馈修改和状态同步。
 
-当前 `main` 分支已经合入飞书交付闭环、PPT 逐页反馈、多 Agent Plan-and-Execute 工作流、飞书文档回写、语音输入、画布预览和 PWA 基础能力。
+当前 `main` 分支已经合入飞书交付闭环、PPT 逐页反馈、多 Agent Plan-and-Execute 工作流、PPT Agent 子图、MckEngine 专业渲染适配、飞书文档回写、语音输入、内容结构画布和 PWA 基础能力。
 
 ## 核心流程
 
@@ -25,7 +25,7 @@ Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它以�
 | 工具层 | `DocTool`、`PPTTool`、`CanvasTool`、`IMTool` 使用 LangChain `StructuredTool` 封装，节点内确定性调用，避免模型随意调用工具造成 Demo 不稳定。 |
 | 文档生成 | 支持生成本地 Markdown 文档；配置飞书后可创建飞书云文档、写入内容、保存文档链接。 |
 | 飞书文档闭环 | 交付卡片可跳转飞书文档；点击“已在飞书中编辑”或接收文档事件后，可拉取远端内容、更新本地版本并记录差异摘要。 |
-| PPT 生成 | 生成结构化 DeckSpec，支持柱状图、饼图、折线图和条形图布局，前端可预览图表，后端导出 `.pptx` 文件，网页和飞书均可下载。 |
+| PPT 生成 | 生成结构化 DeckSpec，并通过 PPT Agent 子图完成简报提炼、版式映射、内容填充和渲染；支持柱状图、饼图、折线图和条形图布局，MckEngine 可用时走专业渲染，否则保持本地 `.pptx` 导出兜底。 |
 | PPT 反馈修改 | 支持“第 3 页再详细一点”这类自然语言反馈，优先做目标页局部修改，重新导出最新版 PPT。 |
 | 演练稿与 Q&A | 为 PPT 生成每页演讲提示、预计时长和 Top Q&A，网页展示并通过飞书 Bot 发送摘要。 |
 | 飞书交付 | 支持进度消息、交付卡片、确认交付、需要修改、文档编辑完成、PPT 文件上传回传。 |
@@ -37,7 +37,7 @@ Agent-Pilot 是一个面向办公协同场景的 IM Agent 原型项目。它以�
 
 | 层级 | 技术 |
 | --- | --- |
-| 后端 | FastAPI、LangChain、LangGraph、SQLAlchemy、aiosqlite、httpx、python-pptx |
+| 后端 | FastAPI、LangChain、LangGraph、SQLAlchemy、aiosqlite、httpx、python-pptx、MckEngine 可选渲染 |
 | 前端 | React、TypeScript、Vite、Tailwind CSS、Zustand |
 | 飞书 Bot | Node.js、`@larksuiteoapi/node-sdk` |
 | 数据库 | SQLite，后续可替换为 PostgreSQL |
@@ -214,7 +214,7 @@ npm run build
 | IM Agent 入口 | 已完成 | 网页和飞书 Bot 都可发起任务，支持文本和语音。 |
 | 需求理解与任务规划 | 已完成 | LangChain + LangGraph + Plan-and-Execute 多 Agent 工作流。 |
 | 文档生成与协同 | 已完成 | 本地文档、飞书文档创建写入、飞书编辑后版本回写和差异记录。 |
-| PPT 生成与交付 | 已完成 | 结构化 PPT、网页预览下载、飞书文件回传。 |
+| PPT 生成与交付 | 已完成 | 结构化 PPT、PPT Agent 子图、MckEngine 专业渲染适配、网页预览下载、飞书文件回传。 |
 | PPT 局部修改 | 已完成 | 支持按页反馈，优先局部修订并重新导出。 |
 | 演练稿与 Q&A | 已完成 | 网页展示并可通过飞书发送摘要。 |
 | 飞书交付闭环 | 已完成 | 卡片按钮、文件上传、状态替换卡、跨群权限基础校验。 |
@@ -240,6 +240,7 @@ npm run build
 - [x] 飞书文档编辑后内容回写、版本更新和差异摘要。
 - [x] 飞书交付卡片确认 / 修改 / 编辑完成按钮稳定响应，并替换为只读状态卡。
 - [x] PPT 逐页反馈修改、演练稿和 Q&A。
+- [x] PPT Agent 子图：简报提炼、版式映射、内容填充、渲染执行四阶段流水线，并适配 MckEngine 专业渲染能力。
 - [x] CanvasTool、内容结构白板、本地交互画布、自动布局、节点拖拽编辑、关系增删、按关系整理、编辑保存、节点联动、同步到 PPT 和 SVG / PNG / JSON 导出。
 - [x] 画布编辑联动 PPT：根据画布节点 / 结构变化更新 DeckSpec，并重新生成最新版 PPT。
 - [x] 响应式 PWA 壳、本地状态恢复和离线消息暂存。
@@ -254,7 +255,7 @@ npm run build
 - [ ] 更细粒度的权限、审计、归档中心和交付记录检索。
 - [ ] 更稳定的部署脚本、演示脚本和端到端自动化测试。
 - [x] 图表布局支持：柱状图、饼图、折线图、条形图，LLM 自动识别数据并生成图表。
-- [ ] 更丰富的 PPT 版式、主题模板和视觉设计能力。
+- [ ] 更多可配置 PPT 主题模板、品牌色规范和高保真页面级视觉细节。
 
 ## License
 
