@@ -8,7 +8,8 @@ provides content and intent, while this module draws stable visual structures.
 
 import logging
 import os
-from typing import Any, Dict
+import time
+from typing import Any, Dict, List
 
 from backend.services.deck_spec import DeckSpec, SlideSpec, ThemeConfig
 
@@ -756,6 +757,95 @@ class PptxGenRenderer:
 
     def _render_diagram_layout(self, slide_obj, slide: SlideSpec, theme: ThemeConfig) -> None:
         self._render_process_layout(slide_obj, slide, theme)
+
+
+class MckEngineRenderer:
+    """Render pre-filled slides into professional PPTX using MckEngine.
+
+    Produces McKinsey-style layouts via the mck-ppt-design-skill engine.
+    Falls back gracefully when mck_ppt is not installed.
+    """
+
+    def __init__(self, output_dir: str = None):
+        self.output_dir = output_dir or "./data/slides"
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._available = None
+
+    @property
+    def available(self) -> bool:
+        if self._available is not None:
+            return self._available
+        try:
+            from mck_ppt import MckEngine
+            self._available = True
+        except ImportError:
+            self._available = False
+        return self._available
+
+    async def render(
+        self,
+        filled_slides: List[Dict[str, Any]],
+        brief: Dict[str, Any] = None,
+        filename: str = None,
+    ) -> Dict[str, Any]:
+        """Render pre-filled slides through MckEngine.
+
+        Args:
+            filled_slides: List of {index, title, mck_method, rendered_params} dicts.
+            brief: Optional PPTBrief dict from outline_node.
+            filename: Output .pptx filename.
+
+        Returns:
+            {success: bool, filepath: str, slides_count: int, error: str|None}
+        """
+        if not self.available:
+            return {"success": False, "error": "mck_ppt not installed"}
+
+        if not filled_slides:
+            return {"success": False, "error": "No slides to render"}
+
+        try:
+            from mck_ppt import MckEngine
+            eng = MckEngine(total_slides=len(filled_slides))
+
+            success_count = 0
+            for slide_info in filled_slides:
+                method_name = slide_info.get("mck_method", "table_insight")
+                params = slide_info.get("rendered_params") or {}
+
+                # Handle cover specially: extract common params
+                if method_name == "cover":
+                    params.pop("source", None)
+                elif method_name == "closing":
+                    params.pop("source_text", None)
+
+                try:
+                    method = getattr(eng, method_name, None)
+                    if method is None:
+                        logger.warning("Unknown MckEngine method '%s', fallback to table_insight", method_name)
+                        method = getattr(eng, "table_insight", None)
+                    if method:
+                        method(**params)
+                        success_count += 1
+                except Exception as slide_exc:
+                    logger.warning("MckEngine.%s failed for slide %s: %s", method_name, slide_info.get("index"), slide_exc)
+
+            if filename is None:
+                title = (brief or {}).get("title", "Presentation")
+                filename = f"{title.replace(' ', '_')}_{int(time.time())}.pptx"
+
+            filepath = os.path.join(self.output_dir, filename)
+            eng.save(filepath)
+
+            logger.info("MckEngine rendered %d/%d slides to %s", success_count, len(filled_slides), filepath)
+            return {
+                "success": True,
+                "filepath": filepath,
+                "slides_count": success_count,
+            }
+        except Exception as exc:
+            logger.exception("MckEngine rendering failed")
+            return {"success": False, "error": str(exc)}
 
 
 class MarkdownToPdfRenderer:

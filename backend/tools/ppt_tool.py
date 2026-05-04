@@ -120,6 +120,11 @@ class PPTTool(BaseTool):
             filename = f"{task_id}_{int(time.time() * 1000)}.pptx"
             filepath = os.path.join(self._output_dir, filename)
 
+            # 优先走 MckEngine 专业渲染（当启用时）；失败则退回视觉增强渲染器。
+            mck_result = await self._try_mck_engine_pptx(filename, title, slides, deck_spec)
+            if mck_result:
+                return mck_result
+
             # 优先走视觉增强渲染器；失败才退回基础 python-pptx，避免交付链路中断。
             visual_result = await self._try_render_visual_pptx(filename, title, slides, deck_spec)
             if visual_result:
@@ -160,6 +165,50 @@ class PPTTool(BaseTool):
 
     async def _render_with_deck_spec(self, deck_spec: Dict, task_id: str) -> Dict[str, Any]:
         return await self._create_pptx(task_id, (deck_spec or {}).get("title"), [], deck_spec)
+
+    @staticmethod
+    def _should_use_mck_engine() -> bool:
+        import os
+        return os.environ.get("USE_PPT_AGENT", "").lower() in ("1", "true", "yes")
+
+    async def _try_mck_engine_pptx(
+        self,
+        filename: str,
+        title: Optional[str],
+        slides: Optional[List[Dict]],
+        deck_spec: Optional[Dict],
+    ) -> Optional[Dict[str, Any]]:
+        if not self._should_use_mck_engine():
+            return None
+        try:
+            from backend.agent.ppt_agent import run_ppt_agent
+            doc_content = ""
+            if deck_spec and isinstance(deck_spec, dict):
+                for s in deck_spec.get("slides", []):
+                    if isinstance(s, dict) and s.get("bullets"):
+                        doc_content += "\n".join(str(b) for b in s["bullets"]) + "\n"
+            result = await run_ppt_agent(
+                deck_spec=deck_spec or {},
+                doc_content=doc_content,
+                intent=title or "",
+                output_dir=self._output_dir,
+            )
+            if not result or result.get("error") or not result.get("ppt_render_result"):
+                self._log("warning", f"MckEngine PPT skipped: {result.get('error', 'no result')}")
+                return None
+            render_result = result["ppt_render_result"]
+            return {
+                "success": True,
+                "slide_id": f"slide_{int(time.time() * 1000)}",
+                "title": render_result.get("title", title or "Presentation"),
+                "slides_count": render_result.get("slides_count", 0),
+                "deck_spec": result.get("deck_spec", deck_spec),
+                "file_path": render_result["filepath"],
+                "download_url": self._download_url(render_result["filepath"]),
+            }
+        except Exception as exc:
+            self._log("warning", f"MckEngine PPT failed, falling back: {exc}")
+            return None
 
     async def _try_render_visual_pptx(
         self,

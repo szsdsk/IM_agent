@@ -724,6 +724,27 @@ SYSTEM_PROMPTS = {
 - content_map 使用中心主题 + 核心观点节点，边表示“支撑/展开/推导”
 - flow 使用 nodes + edges
 - architecture 使用 layers。""",
+
+    "ppt_brief_generator": (
+        "你是一位资深演示文稿策划师。根据给定的草稿规格和源材料，"
+        "输出结构化的演示文稿简报（brief），用于指导专业级幻灯片设计。\n\n"
+        "输出格式（严格 JSON）：\n"
+        "{\n"
+        '  "title": "演示文稿标题（不超过40字）",\n'
+        '  "subtitle": "副标题或标语",\n'
+        '  "audience": "目标受众描述",\n'
+        '  "slide_count": 8-15之间的整数,\n'
+        '  "key_messages": ["核心信息1", "核心信息2", "核心信息3"],\n'
+        '  "tone": "formal|executive|technical|casual 其中之一",\n'
+        '  "date": "封面日期字符串",\n'
+        '  "sections": [{"name": "章节名", "slides": 页数, "message": "该章节传达的核心信息"}]\n'
+        "}\n\n"
+        "设计原则：\n"
+        "- 管理层受众：页数少（8-10），数据驱动\n"
+        "- 技术人员：可深入（12-15），包含流程细节\n"
+        "- 每页只传达一个核心信息\n"
+        "- 先给结论，后给支撑细节\n"
+    ),
 }
 
 SYSTEM_PROMPTS["im_context_summarizer"] = (
