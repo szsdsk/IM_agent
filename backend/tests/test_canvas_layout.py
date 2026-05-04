@@ -1,6 +1,8 @@
+import asyncio
 import unittest
 
 from backend.services.canvas_layout import normalize_canvas_artifact
+from backend.services.llm_service import generate_canvas_spec
 
 
 class CanvasLayoutTests(unittest.TestCase):
@@ -60,6 +62,44 @@ class CanvasLayoutTests(unittest.TestCase):
         self.assertIn("doc", artifact_types)
         self.assertIn("slides", artifact_types)
         self.assertEqual(result["diagram_type"], "delivery_pipeline")
+
+    def test_content_map_layout_keeps_edges_readable(self):
+        result = normalize_canvas_artifact(
+            title="项目评审内容结构",
+            diagram_type="content_map",
+            task_id="task_content",
+            nodes=[
+                {"id": "topic", "text": "企业知识库智能问答", "type": "theme"},
+                {"id": "p1", "text": "业务背景与目标", "type": "insight"},
+                {"id": "p2", "text": "核心架构", "type": "insight"},
+                {"id": "p3", "text": "落地计划", "type": "action"},
+            ],
+            edges=[
+                {"source": "topic", "target": "p1", "label": "支撑"},
+                {"source": "topic", "target": "p2", "label": "支撑"},
+                {"source": "topic", "target": "p3", "label": "支撑"},
+            ],
+        )
+
+        self.assertEqual(result["diagram_type"], "content_map")
+        topic = next(node for node in result["nodes"] if node["id"] == "topic")
+        children = [node for node in result["nodes"] if node["id"] != "topic"]
+        self.assertTrue(all(child["x"] > topic["x"] for child in children))
+        self.assertEqual(len(result["edges"]), 3)
+
+    def test_local_canvas_spec_uses_content_not_workflow_steps(self):
+        spec = asyncio.run(generate_canvas_spec(
+            title="原神项目评审 PPT",
+            intent="生成一个原神的项目评审 PPT",
+            doc_content="# 背景与目标\n- 介绍产品定位\n- 分析用户体验\n- 给出运营计划",
+            steps=[{"action": "generate_doc"}, {"action": "generate_canvas"}, {"action": "generate_slides"}],
+            use_llm=False,
+        ))
+
+        labels = {node["text"] for node in spec["nodes"]}
+        self.assertEqual(spec["diagram_type"], "content_map")
+        self.assertNotIn("generate_slides", labels)
+        self.assertTrue(any("背景" in label or "用户体验" in label for label in labels))
 
 
 if __name__ == "__main__":

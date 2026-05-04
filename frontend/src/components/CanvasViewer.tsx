@@ -229,20 +229,30 @@ function normalizeCanvasElements(canvas: CanvasArtifact): {
 }
 
 function edgePath(edge: CanvasEdgeElement, nodeMap: Map<string, CanvasNodeElement>): string {
-  const points = edge.points?.length
-    ? edge.points
-    : (() => {
-        const source = nodeMap.get(edge.source)
-        const target = nodeMap.get(edge.target)
-        if (!source || !target) return []
-        const start = { x: source.x + source.width, y: source.y + source.height / 2 }
-        const end = { x: target.x, y: target.y + target.height / 2 }
-        const midX = (start.x + end.x) / 2
-        return [start, { x: midX, y: start.y }, { x: midX, y: end.y }, end]
-      })()
+  const source = nodeMap.get(edge.source)
+  const target = nodeMap.get(edge.target)
+  if (!source || !target) return ''
 
-  if (points.length < 2) return ''
-  return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
+  const sourceCenter = { x: source.x + source.width / 2, y: source.y + source.height / 2 }
+  const targetCenter = { x: target.x + target.width / 2, y: target.y + target.height / 2 }
+  const dx = targetCenter.x - sourceCenter.x
+  const dy = targetCenter.y - sourceCenter.y
+  const horizontal = Math.abs(dx) >= Math.abs(dy)
+
+  const start = horizontal
+    ? { x: dx >= 0 ? source.x + source.width : source.x, y: sourceCenter.y }
+    : { x: sourceCenter.x, y: dy >= 0 ? source.y + source.height : source.y }
+  const end = horizontal
+    ? { x: dx >= 0 ? target.x : target.x + target.width, y: targetCenter.y }
+    : { x: targetCenter.x, y: dy >= 0 ? target.y : target.y + target.height }
+
+  // 画布连线使用流程图常见的正交折线，避免贝塞尔曲线在多节点场景里交叉得过于混乱。
+  if (horizontal) {
+    const midX = (start.x + end.x) / 2
+    return `M ${start.x} ${start.y} L ${midX} ${start.y} L ${midX} ${end.y} L ${end.x} ${end.y}`
+  }
+  const midY = (start.y + end.y) / 2
+  return `M ${start.x} ${start.y} L ${start.x} ${midY} L ${end.x} ${midY} L ${end.x} ${end.y}`
 }
 
 function edgeLabelPosition(edge: CanvasEdgeElement, nodeMap: Map<string, CanvasNodeElement>): CanvasPoint | null {
@@ -306,6 +316,71 @@ function selectedRelations(node: CanvasNodeElement, edges: CanvasEdgeElement[]):
   return parts.join('；') || '暂无上下游关系'
 }
 
+function arrangeNodesByRelations(nodes: CanvasNodeElement[], edges: CanvasEdgeElement[]): CanvasNodeElement[] {
+  const nodeIds = new Set(nodes.map((node) => node.id))
+  const validEdges = edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target))
+  const outgoing = new Map(nodes.map((node) => [node.id, [] as string[]]))
+  const indegree = new Map(nodes.map((node) => [node.id, 0]))
+
+  validEdges.forEach((edge) => {
+    outgoing.get(edge.source)?.push(edge.target)
+    indegree.set(edge.target, (indegree.get(edge.target) || 0) + 1)
+  })
+
+  const levels = new Map(nodes.map((node) => [node.id, 0]))
+  const queue = nodes.filter((node) => (indegree.get(node.id) || 0) === 0).map((node) => node.id)
+  const ordered: string[] = []
+
+  while (queue.length) {
+    const id = queue.shift()!
+    ordered.push(id)
+    for (const targetId of outgoing.get(id) || []) {
+      levels.set(targetId, Math.max(levels.get(targetId) || 0, (levels.get(id) || 0) + 1))
+      indegree.set(targetId, (indegree.get(targetId) || 0) - 1)
+      if ((indegree.get(targetId) || 0) === 0) queue.push(targetId)
+    }
+  }
+
+  // 如果用户手动连出了环，无法完全无交叉；这里把环内剩余节点放到最后一列，至少不让线穿满全图。
+  const unresolved = nodes.filter((node) => !ordered.includes(node.id))
+  const fallbackLevel = Math.max(0, ...Array.from(levels.values())) + 1
+  unresolved.forEach((node, index) => {
+    levels.set(node.id, fallbackLevel + index)
+  })
+
+  const levelGroups = new Map<number, CanvasNodeElement[]>()
+  nodes.forEach((node) => {
+    const level = levels.get(node.id) || 0
+    levelGroups.set(level, [...(levelGroups.get(level) || []), node])
+  })
+
+  const sortedLevels = Array.from(levelGroups.keys()).sort((a, b) => a - b)
+  const rowById = new Map<string, number>()
+  const arranged: CanvasNodeElement[] = []
+
+  sortedLevels.forEach((level) => {
+    const group = levelGroups.get(level) || []
+    group.sort((a, b) => {
+      const aParents = validEdges.filter((edge) => edge.target === a.id).map((edge) => rowById.get(edge.source) ?? 0)
+      const bParents = validEdges.filter((edge) => edge.target === b.id).map((edge) => rowById.get(edge.source) ?? 0)
+      const aScore = aParents.length ? aParents.reduce((sum, row) => sum + row, 0) / aParents.length : nodes.indexOf(a)
+      const bScore = bParents.length ? bParents.reduce((sum, row) => sum + row, 0) / bParents.length : nodes.indexOf(b)
+      return aScore - bScore
+    })
+
+    group.forEach((node, row) => {
+      rowById.set(node.id, row)
+      arranged.push({
+        ...node,
+        x: 96 + level * 330,
+        y: 96 + row * 148,
+      })
+    })
+  })
+
+  return arranged
+}
+
 function rebuildCanvasArtifact(
   canvas: CanvasArtifact,
   groups: CanvasGroupElement[],
@@ -348,6 +423,7 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
   const [isDirty, setIsDirty] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [pptSyncStatus, setPptSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle')
+  const [relationTargetId, setRelationTargetId] = useState('')
 
   useEffect(() => {
     setDraftCanvas(canvas)
@@ -375,6 +451,10 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
   const viewport = getContentViewport(groups, nodes, edges, backendViewport)
   const markerId = `canvas_arrow_${String(currentCanvas.canvas_id || 'local').replace(/[^a-zA-Z0-9_-]/g, '_')}`
 
+  function nodeLabel(nodeId: string): string {
+    return nodeMap.get(nodeId)?.text || nodeId
+  }
+
   function isArtifactAvailable(kind: ArtifactKind): boolean {
     if (kind === 'doc') return Boolean(doc)
     if (kind === 'slides') return Boolean(slides)
@@ -387,9 +467,73 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
     setSaveStatus('idle')
   }
 
+  function updateDraftGraph(nextNodes: CanvasNodeElement[], nextEdges: CanvasEdgeElement[]) {
+    setDraftCanvas(rebuildCanvasArtifact(currentCanvas, groups, nextNodes, nextEdges))
+    setIsDirty(true)
+    setSaveStatus('idle')
+    setPptSyncStatus('idle')
+  }
+
+  function updateDraftEdges(nextEdges: CanvasEdgeElement[]) {
+    updateDraftGraph(nodes, nextEdges)
+  }
+
   function updateSelectedNode(patch: Partial<CanvasNodeElement>) {
     if (!selectedNode) return
     updateDraftNodes(nodes.map((node) => (node.id === selectedNode.id ? { ...node, ...patch } : node)))
+  }
+
+  function addCanvasNode() {
+    const anchor = selectedNode || nodes[nodes.length - 1]
+    const id = `n_${Date.now()}`
+    const nextNode: CanvasNodeElement = {
+      type: 'node',
+      id,
+      text: '新观点',
+      kind: 'insight',
+      artifact_type: null,
+      description: '补充这个节点如何支撑 PPT 结构',
+      x: Math.round((anchor?.x || 120) + 300),
+      y: Math.round(anchor?.y || 120),
+      width: 220,
+      height: 88,
+      style: { fill: '#F0FDF4', stroke: '#16A34A', text: '#14532D', accent: '#22C55E' },
+    }
+    const nextEdges = anchor
+      ? [...edges, { type: 'edge' as const, id: `e_${Date.now()}`, source: anchor.id, target: id, label: '展开' }]
+      : edges
+    updateDraftGraph([...nodes, nextNode], nextEdges)
+    setSelectedId(id)
+  }
+
+  function deleteSelectedNode() {
+    if (!selectedNode || nodes.length <= 1) return
+    const nextNodes = nodes.filter((node) => node.id !== selectedNode.id)
+    const nextEdges = edges.filter((edge) => edge.source !== selectedNode.id && edge.target !== selectedNode.id)
+    updateDraftGraph(nextNodes, nextEdges)
+    setSelectedId(nextNodes[0]?.id || null)
+  }
+
+  function addRelation() {
+    if (!selectedNode || !relationTargetId || relationTargetId === selectedNode.id) return
+    const exists = edges.some((edge) => edge.source === selectedNode.id && edge.target === relationTargetId)
+    if (exists) return
+    updateDraftEdges([
+      ...edges,
+      { type: 'edge', id: `e_${Date.now()}`, source: selectedNode.id, target: relationTargetId, label: '下一步' },
+    ])
+    setRelationTargetId('')
+  }
+
+  function removeRelation(edgeId: string) {
+    updateDraftEdges(edges.filter((edge) => edge.id !== edgeId))
+  }
+
+  function autoArrangeByRelations() {
+    if (!nodes.length) return
+    const nextNodes = arrangeNodesByRelations(nodes, edges)
+    updateDraftGraph(nextNodes, edges)
+    resetView()
   }
 
   function handleNodeMouseDown(node: CanvasNodeElement, event: MouseEvent) {
@@ -568,6 +712,20 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
           >
             撤销修改
           </button>
+          <button type="button" onClick={addCanvasNode} className="rounded border px-3 py-1 text-xs text-gray-600 hover:bg-white">
+            新增节点
+          </button>
+          <button
+            type="button"
+            onClick={deleteSelectedNode}
+            disabled={!selectedNode || nodes.length <= 1}
+            className="rounded border border-red-200 px-3 py-1 text-xs text-red-500 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            删除节点
+          </button>
+          <button type="button" onClick={autoArrangeByRelations} className="rounded border px-3 py-1 text-xs text-gray-600 hover:bg-white">
+            按关系整理
+          </button>
           <button type="button" onClick={resetView} className="rounded border px-3 py-1 text-xs text-gray-600 hover:bg-white">
             适配视图
           </button>
@@ -591,6 +749,38 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
             </a>
           )}
         </div>
+        {selectedNode && (
+          <div className="basis-full rounded-lg border border-blue-100 bg-white px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-gray-500">添加边：</span>
+              <span className="max-w-[260px] truncate font-medium text-gray-800">{selectedNode.text}</span>
+              <span className="text-gray-400">→</span>
+              <select
+                value={relationTargetId}
+                onChange={(event) => setRelationTargetId(event.target.value)}
+                className="min-w-[220px] rounded border border-gray-200 px-2 py-1 text-gray-700 outline-none focus:border-blue-400"
+              >
+                <option value="">选择目标节点</option>
+                {nodes
+                  .filter((node) => node.id !== selectedNode.id)
+                  .map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {node.text}
+                    </option>
+                  ))}
+              </select>
+              <button
+                type="button"
+                onClick={addRelation}
+                disabled={!relationTargetId}
+                className="rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+              >
+                添加边
+              </button>
+              <span className="text-gray-400">这会把当前节点设为上游，目标节点设为下游。</span>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col">
@@ -648,7 +838,15 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
                 if (!path) return null
                 return (
                   <g key={edge.id}>
-                    <path d={path} fill="none" stroke="#64748B" strokeWidth="2.2" markerEnd={`url(#${markerId})`} />
+                    <path
+                      d={path}
+                      fill="none"
+                      stroke="#64748B"
+                      strokeWidth="2.2"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                      markerEnd={`url(#${markerId})`}
+                    />
                     {edge.label && labelPosition && (
                       <g>
                         <rect
@@ -716,7 +914,7 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
             </g>
           </svg>
           <div className="absolute bottom-3 left-4 rounded-full bg-white/90 px-3 py-1 text-xs text-slate-500 shadow-sm">
-            缩放 {Math.round(zoom * 100)}% · 拖拽节点编辑布局，拖拽空白处移动画布
+            缩放 {Math.round(zoom * 100)}% · 拖拽节点改排版，右侧增删关系改结构
           </div>
         </div>
 
@@ -769,6 +967,58 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
               <div>
                 <p className="text-xs text-gray-400">关系</p>
                 <p className="mt-1 text-gray-700">{selectedRelations(selectedNode, edges)}</p>
+                <div className="mt-2 flex gap-2">
+                  <select
+                    value={relationTargetId}
+                    onChange={(event) => setRelationTargetId(event.target.value)}
+                    className="min-w-0 flex-1 rounded border border-gray-200 px-2 py-2 text-xs text-gray-700 outline-none focus:border-blue-400"
+                  >
+                    <option value="">选择下游节点</option>
+                    {nodes
+                      .filter((node) => node.id !== selectedNode.id)
+                      .map((node) => (
+                        <option key={node.id} value={node.id}>
+                          {node.text}
+                        </option>
+                      ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={addRelation}
+                    disabled={!relationTargetId}
+                    className="rounded bg-slate-900 px-3 py-2 text-xs text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+                  >
+                    添加下游
+                  </button>
+                </div>
+                <div className="mt-2 space-y-1">
+                  {edges
+                    .filter((edge) => edge.source === selectedNode.id || edge.target === selectedNode.id)
+                    .map((edge) => {
+                      const isOutgoing = edge.source === selectedNode.id
+                      return (
+                        <div key={edge.id} className="flex items-center justify-between gap-2 rounded bg-gray-50 px-2 py-1 text-xs text-gray-600">
+                          <span className="min-w-0 flex-1 truncate">
+                            {isOutgoing ? `下游：${nodeLabel(edge.target)}` : `上游：${nodeLabel(edge.source)}`}
+                          </span>
+                          <button type="button" onClick={() => removeRelation(edge.id)} className="text-red-500 hover:text-red-600">
+                            删除
+                          </button>
+                        </div>
+                      )
+                    })}
+                </div>
+                <p className="mt-2 text-xs text-gray-400">
+                  拖动节点只调整视觉位置；增删上下游关系才会改变内容结构和同步到 PPT 的顺序。
+                </p>
+                <button
+                  type="button"
+                  onClick={deleteSelectedNode}
+                  disabled={nodes.length <= 1}
+                  className="mt-2 w-full rounded border border-red-200 px-3 py-2 text-xs text-red-500 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  删除当前节点
+                </button>
               </div>
               <div>
                 <p className="text-xs text-gray-400">同步状态</p>

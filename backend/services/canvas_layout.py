@@ -7,6 +7,7 @@ NODE_HEIGHT = 88
 FLOW_GAP_X = 92
 FLOW_GAP_Y = 92
 ARCH_LAYER_HEIGHT = 132
+CONTENT_GAP_Y = 34
 
 
 TYPE_STYLES = {
@@ -20,6 +21,10 @@ TYPE_STYLES = {
     "document": {"fill": "#F8FAFC", "stroke": "#64748B", "text": "#0F172A", "accent": "#94A3B8"},
     "slides": {"fill": "#FFF7ED", "stroke": "#EA580C", "text": "#7C2D12", "accent": "#F97316"},
     "canvas": {"fill": "#ECFEFF", "stroke": "#0891B2", "text": "#164E63", "accent": "#06B6D4"},
+    "theme": {"fill": "#EFF6FF", "stroke": "#2563EB", "text": "#1E3A8A", "accent": "#3B82F6"},
+    "insight": {"fill": "#F0FDF4", "stroke": "#16A34A", "text": "#14532D", "accent": "#22C55E"},
+    "evidence": {"fill": "#FDF4FF", "stroke": "#C026D3", "text": "#701A75", "accent": "#D946EF"},
+    "action": {"fill": "#FFF7ED", "stroke": "#EA580C", "text": "#7C2D12", "accent": "#F97316"},
     "default": {"fill": "#FFFFFF", "stroke": "#CBD5E1", "text": "#1E293B", "accent": "#3B82F6"},
 }
 
@@ -49,6 +54,8 @@ def normalize_canvas_artifact(
         layout_nodes, layout_edges, viewport = _reuse_elements(elements, normalized_nodes, normalized_edges)
     elif resolved_type == "architecture":
         layout_nodes, layout_edges, viewport = _layout_architecture(normalized_nodes, normalized_edges, normalized_layers)
+    elif resolved_type == "content_map":
+        layout_nodes, layout_edges, viewport = _layout_content_map(normalized_nodes, normalized_edges)
     elif resolved_type == "delivery_pipeline":
         layout_nodes, layout_edges, viewport = _layout_delivery_pipeline(normalized_nodes, normalized_edges)
     else:
@@ -148,6 +155,9 @@ def _normalize_layers(layers: List[List[str]]) -> List[List[str]]:
 
 
 def _layout_flow(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    if edges:
+        return _layout_by_edge_direction(nodes, edges)
+
     columns = 3 if len(nodes) > 5 else max(len(nodes), 1)
     placed = []
     for index, node in enumerate(nodes):
@@ -159,12 +169,79 @@ def _layout_flow(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Tu
     return _with_edges(placed, edges)
 
 
+def _layout_by_edge_direction(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """按上下游关系做左到右分层，尽量避免流程图边反向穿插。"""
+    node_ids = {node["id"] for node in nodes}
+    valid_edges = [edge for edge in edges if edge.get("source") in node_ids and edge.get("target") in node_ids]
+    outgoing = {node["id"]: [] for node in nodes}
+    indegree = {node["id"]: 0 for node in nodes}
+    for edge in valid_edges:
+        outgoing[edge["source"]].append(edge["target"])
+        indegree[edge["target"]] += 1
+
+    levels = {node["id"]: 0 for node in nodes}
+    queue = [node["id"] for node in nodes if indegree[node["id"]] == 0]
+    visited = []
+    while queue:
+        node_id = queue.pop(0)
+        visited.append(node_id)
+        for target_id in outgoing.get(node_id, []):
+            levels[target_id] = max(levels.get(target_id, 0), levels.get(node_id, 0) + 1)
+            indegree[target_id] -= 1
+            if indegree[target_id] == 0:
+                queue.append(target_id)
+
+    fallback_level = max(levels.values() or [0]) + 1
+    for index, node in enumerate(nodes):
+        if node["id"] not in visited and valid_edges:
+            levels[node["id"]] = fallback_level + index
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for node in nodes:
+        grouped.setdefault(levels[node["id"]], []).append(node)
+
+    placed = []
+    for level in sorted(grouped):
+        for row, node in enumerate(grouped[level]):
+            x = 96 + level * (NODE_WIDTH + 110)
+            y = 96 + row * (NODE_HEIGHT + 72)
+            placed.append(_node_element(node, x, y))
+    return _with_edges(placed, edges)
+
+
 def _layout_delivery_pipeline(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     placed = []
     for index, node in enumerate(nodes):
         x = 96 + index * (NODE_WIDTH + 72)
         y = 150 + (36 if index % 2 else 0)
         placed.append(_node_element(node, x, y))
+    return _with_edges(placed, edges)
+
+
+def _layout_content_map(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """把内容型画布排成左侧主题、右侧观点列表，避免自由拖拽前就出现交叉线。"""
+    if not nodes:
+        return _with_edges([], edges)
+
+    placed = []
+    center = _node_element({**nodes[0], "type": "theme"}, 96, 220)
+    center["width"] = 260
+    center["height"] = 112
+    placed.append(center)
+
+    children = nodes[1:] or nodes[:1]
+    for index, node in enumerate(children):
+        # 内容白板默认按单列展开，牺牲一点横向空间来换取更稳定、少交叉的阅读路径。
+        x = 460
+        y = 72 + index * (NODE_HEIGHT + CONTENT_GAP_Y)
+        visual_type = node.get("type") if node.get("type") in {"insight", "evidence", "action"} else "insight"
+        placed.append(_node_element({**node, "type": visual_type}, x, y))
+
+    if not edges and len(placed) > 1:
+        edges = [
+            {"id": f"e{index}", "source": placed[0]["id"], "target": node["id"], "label": ""}
+            for index, node in enumerate(placed[1:], 1)
+        ]
     return _with_edges(placed, edges)
 
 
@@ -276,7 +353,7 @@ def _viewport(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _resolve_diagram_type(diagram_type: Optional[str], nodes: List[Dict[str, Any]], layers: List[List[str]], title: str) -> str:
     requested = (diagram_type or "").lower()
-    if requested in {"architecture", "delivery_pipeline", "flow"}:
+    if requested in {"architecture", "delivery_pipeline", "flow", "content_map"}:
         return requested
     if layers or any(word in title for word in ["架构", "architecture", "系统"]):
         return "architecture"
