@@ -93,6 +93,25 @@ export const api = {
     })
   },
 
+  async applyCanvasToSlides(
+    taskId: string,
+    canvas?: CanvasArtifact,
+    clientId?: string,
+    deviceType?: string
+  ): Promise<{ success: boolean; canvas: CanvasArtifact; slides: Slide; task: Task }> {
+    return fetchAPI<{ success: boolean; canvas: CanvasArtifact; slides: Slide; task: Task }>(
+      `/tasks/${taskId}/canvas/apply-to-slides`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          canvas,
+          client_id: clientId,
+          device_type: deviceType,
+        }),
+      }
+    )
+  },
+
   async getDocument(documentId: string): Promise<Document> {
     return fetchAPI<Document>(`/documents/${documentId}`)
   },
