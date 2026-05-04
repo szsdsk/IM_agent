@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -360,6 +361,8 @@ class AgentOrchestrator:
         if agent == "canvas_agent":
             return await nodes.generate_canvas(state)
         if agent == "deck_agent":
+            if self._should_use_ppt_agent(state):
+                return await self._run_ppt_agent_subgraph(state)
             return await nodes.generate_slides(state)
         if agent == "rehearsal_agent":
             if not state.get("slides_content"):
@@ -377,6 +380,59 @@ class AgentOrchestrator:
             return state
 
         state["error"] = f"Unknown agent: {agent}"
+        return state
+
+    @staticmethod
+    def _should_use_ppt_agent(state: AgentState) -> bool:
+        import os
+        if os.environ.get("USE_PPT_AGENT", "").lower() in ("1", "true", "yes"):
+            return True
+        renderer = (state.get("deck_spec") or {}).get("metadata", {}).get("renderer")
+        if renderer == "mck_engine":
+            return True
+        if renderer == "legacy":
+            return False
+        scene = state.get("presentation_scene") or ""
+        return scene in {"management_briefing", "proposal_pitch", "project_review"}
+
+    async def _run_ppt_agent_subgraph(self, state: AgentState) -> AgentState:
+        from backend.agent.ppt_agent import run_ppt_agent
+
+        doc_content = "\n\n".join(
+            item for item in [
+                (state.get("doc_content") or {}).get("content", state.get("intent", "")),
+                format_im_context_for_prompt(state.get("im_context_summary")),
+            ] if item
+        )
+
+        try:
+            result = await run_ppt_agent(
+                deck_spec=state.get("deck_spec") or {},
+                doc_content=doc_content,
+                intent=state.get("intent", ""),
+                audience=state.get("audience", "管理层"),
+                presentation_scene=state.get("presentation_scene"),
+                output_dir=os.path.join(os.path.dirname(__file__), "..", "data", "slides"),
+            )
+        except Exception as exc:
+            logger.warning("PPT Agent failed (%s), falling back to legacy renderer", exc)
+            return await nodes.generate_slides(state)
+
+        if result.get("error"):
+            logger.warning("PPT Agent error: %s, falling back to legacy renderer", result["error"])
+            return await nodes.generate_slides(state)
+
+        render_result = result.get("ppt_render_result") or {}
+        state["slides_content"] = result.get("slides_content", {})
+        state["deck_spec"] = result.get("deck_spec", state.get("deck_spec"))
+        state.setdefault("messages", []).append({
+            "role": "assistant",
+            "content": f"PPT Agent 生成了 {render_result.get('slides_count', '?')} 页专业幻灯片 (MckEngine)。",
+            "timestamp": datetime.utcnow().isoformat(),
+            "step": "generate_slides",
+            "agent": "ppt_agent",
+            "renderer": "mck_engine",
+        })
         return state
 
     @staticmethod
