@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.agent.orchestrator import agent_orchestrator
 from backend.config import settings
 from backend.api.schemas import (
+    CanvasToSlidesRequest,
     CanvasUpdateRequest,
     CreateSessionRequest,
     DocumentResponse,
@@ -30,8 +31,10 @@ from backend.api.schemas import (
 from backend.database.connection import async_session_maker, get_db
 from backend.database.models import Document, Event, Session, Slide, Task
 from backend.services.lark_bot_service import build_delivery_status_card, lark_bot_service
+from backend.services.canvas_to_deck import build_canvas_linked_deck
 from backend.services.speech_service import speech_service
 from backend.services.sync_service import EventType, sync_service
+from backend.tools.tool_factory import ToolFactory
 
 router = APIRouter()
 
@@ -480,7 +483,12 @@ async def _build_feedback_base_result(db: AsyncSession, task: Task) -> Dict[str,
 
     slide_payload = result.get("slides") or result.get("deck")
     if not _has_slide_pages(slide_payload):
-        slide_result = await db.execute(select(Slide).where(Slide.task_id == task.id))
+        slide_result = await db.execute(
+            select(Slide)
+            .where(Slide.task_id == task.id)
+            .order_by(Slide.updated_at.desc(), Slide.created_at.desc())
+            .limit(1)
+        )
         slide_record = slide_result.scalar_one_or_none()
         if slide_record and _has_slide_pages(slide_record.slides_json):
             slide_payload = dict(slide_record.slides_json)
@@ -490,7 +498,12 @@ async def _build_feedback_base_result(db: AsyncSession, task: Task) -> Dict[str,
 
     doc_payload = result.get("document") or result.get("doc")
     if not isinstance(doc_payload, dict) or not doc_payload.get("content"):
-        doc_result = await db.execute(select(Document).where(Document.task_id == task.id))
+        doc_result = await db.execute(
+            select(Document)
+            .where(Document.task_id == task.id)
+            .order_by(Document.updated_at.desc(), Document.created_at.desc())
+            .limit(1)
+        )
         doc_record = doc_result.scalar_one_or_none()
         if doc_record and doc_record.content:
             doc_payload = {
@@ -507,6 +520,12 @@ async def _build_feedback_base_result(db: AsyncSession, task: Task) -> Dict[str,
             }
             result["document"] = doc_payload
             result["doc"] = doc_payload
+
+    canvas_payload = result.get("canvas")
+    if not isinstance(canvas_payload, dict):
+        canvas_payload = _task_canvas_payload(task)
+        if isinstance(canvas_payload, dict):
+            result["canvas"] = canvas_payload
 
     return result
 
@@ -1462,6 +1481,159 @@ async def update_task_canvas(
         artifact_id=canvas.get("canvas_id"),
     )
     return {"success": True, "canvas": canvas, "task": _task_to_dict(task)}
+
+
+@router.post("/tasks/{task_id}/canvas/apply-to-slides")
+async def apply_canvas_to_slides(
+    task_id: str,
+    request: CanvasToSlidesRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """把最新画布结构同步为 PPT 中的一页结构说明，并重新导出 PPT 文件。"""
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if _task_delivery_confirmed(task):
+        raise HTTPException(status_code=409, detail="Task has been confirmed and cannot be modified")
+
+    old_canvas = _task_canvas_payload(task) or {}
+    canvas = dict(request.canvas or old_canvas)
+    if not canvas:
+        raise HTTPException(status_code=400, detail="Canvas payload is required")
+
+    base_result = await _build_feedback_base_result(db, task)
+    slides_payload = base_result.get("slides") or base_result.get("deck")
+    if not _has_slide_pages(slides_payload):
+        raise HTTPException(status_code=409, detail="Slides are required before syncing canvas to PPT")
+
+    old_metadata = old_canvas.get("metadata") if isinstance(old_canvas.get("metadata"), dict) else {}
+    metadata = dict(canvas.get("metadata") or {})
+    try:
+        version_seed = int(metadata.get("version") or old_metadata.get("version") or 1)
+    except (TypeError, ValueError):
+        version_seed = 1
+
+    canvas_changed = json.dumps(canvas.get("elements") or canvas.get("nodes") or [], sort_keys=True, ensure_ascii=False) != json.dumps(
+        old_canvas.get("elements") or old_canvas.get("nodes") or [],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    metadata.update({
+        "version": version_seed + 1 if canvas_changed else version_seed,
+        "sync_status": "ppt_synced",
+        "last_synced_to_slides_at": datetime.utcnow().isoformat(),
+        "last_edited_at": metadata.get("last_edited_at") or datetime.utcnow().isoformat(),
+        "last_edited_by": request.client_id or metadata.get("last_edited_by") or "web",
+    })
+    canvas["metadata"] = metadata
+    canvas["provider"] = canvas.get("provider") or old_canvas.get("provider") or "local_canvas"
+    canvas["canvas_id"] = canvas.get("canvas_id") or old_canvas.get("canvas_id") or f"canvas_{task.id}"
+    canvas["exportable"] = canvas.get("exportable", True)
+
+    deck_spec = build_canvas_linked_deck(dict(slides_payload), canvas)
+    render_result = await ToolFactory.invoke_tool(
+        "PPTTool",
+        {
+            "action": "create_slides",
+            "task_id": task.id,
+            "title": deck_spec.get("title") or task.intent,
+            "slides": deck_spec.get("slides", []),
+            "deck_spec": deck_spec,
+        },
+    )
+    if not render_result.get("success"):
+        raise HTTPException(status_code=500, detail=render_result.get("error") or "Failed to render PPT")
+
+    final_deck_spec = render_result.get("deck_spec") or deck_spec
+    final_metadata = dict(final_deck_spec.get("metadata") or deck_spec.get("metadata") or {})
+    final_metadata.setdefault("feedback_history", slides_payload.get("feedback_history", []))
+    final_slides = [
+        {**slide, "index": index}
+        for index, slide in enumerate(final_deck_spec.get("slides") or deck_spec.get("slides") or [])
+        if isinstance(slide, dict)
+    ]
+    slides_content = {
+        "slide_id": render_result.get("slide_id") or slides_payload.get("slide_id"),
+        "title": final_deck_spec.get("title") or slides_payload.get("title") or task.intent,
+        "slides": final_slides,
+        "slides_count": len(final_slides),
+        "file_path": render_result.get("download_url") or render_result.get("file_path") or slides_payload.get("file_path"),
+        "theme": final_deck_spec.get("theme") or slides_payload.get("theme"),
+        "visual_profile": final_deck_spec.get("visual_profile") or slides_payload.get("visual_profile"),
+        "audience": final_deck_spec.get("audience") or slides_payload.get("audience"),
+        "duration_minutes": final_deck_spec.get("duration_minutes") or slides_payload.get("duration_minutes"),
+        "metadata": final_metadata,
+        "rehearsal": slides_payload.get("rehearsal"),
+        "qa": slides_payload.get("qa", []),
+        "feedback_history": final_metadata.get("feedback_history", slides_payload.get("feedback_history", [])),
+    }
+
+    existing_slide_result = await db.execute(
+        select(Slide)
+        .where(Slide.task_id == task.id)
+        .order_by(Slide.updated_at.desc(), Slide.created_at.desc())
+        .limit(1)
+    )
+    slide_record = existing_slide_result.scalar_one_or_none()
+    if not slide_record:
+        slide_record = Slide(task_id=task.id)
+        db.add(slide_record)
+    slide_record.slides_json = slides_content
+    slide_record.file_path = slides_content.get("file_path")
+    slide_record.updated_at = datetime.utcnow()
+
+    result_json = dict(task.result_json) if isinstance(task.result_json, dict) else {}
+    result_payload = dict(result_json.get("result")) if isinstance(result_json.get("result"), dict) else {}
+    result_payload["canvas"] = canvas
+    result_payload["slides"] = slides_content
+    result_payload["deck"] = slides_content
+    result_json["result"] = result_payload
+    result_json["progress"] = max(float(result_json.get("progress") or task.progress or 0), 1.0)
+    task.status = "completed"
+    task.current_step = "canvas_to_slides"
+    task.result_json = result_json
+    task.updated_at = datetime.utcnow()
+
+    db.add(Event(
+        id=str(uuid.uuid4()),
+        task_id=task.id,
+        session_id=task.session_id,
+        event_type="canvas.slides_synced",
+        client_id=request.client_id,
+        device_type=request.device_type,
+        payload={
+            "canvas_id": canvas.get("canvas_id"),
+            "slide_id": slides_content.get("slide_id"),
+            "slides_count": len(final_slides),
+            "canvas_version": metadata.get("version"),
+        },
+    ))
+    await db.commit()
+    await db.refresh(task)
+    await db.refresh(slide_record)
+
+    await sync_service.broadcast_artifact_update(
+        session_id=task.session_id,
+        task_id=task.id,
+        artifact_type="canvas",
+        artifact=canvas,
+        artifact_id=canvas.get("canvas_id"),
+    )
+    await sync_service.broadcast_artifact_update(
+        session_id=task.session_id,
+        task_id=task.id,
+        artifact_type="slides",
+        artifact=_slide_to_dict(slide_record),
+        artifact_id=slide_record.id,
+    )
+    return {
+        "success": True,
+        "canvas": canvas,
+        "slides": _slide_to_dict(slide_record),
+        "slides_payload": slides_content,
+        "task": _task_to_dict(task),
+    }
 
 
 @router.post("/tasks/{task_id}/confirm", response_model=TaskResponse)

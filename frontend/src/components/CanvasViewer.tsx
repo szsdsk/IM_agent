@@ -337,6 +337,7 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
   const clientId = useSessionStore((state) => state.clientId)
   const deviceType = useSessionStore((state) => state.deviceType)
   const setCanvas = useSessionStore((state) => state.setCanvas)
+  const setSlides = useSessionStore((state) => state.setSlides)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
@@ -346,11 +347,13 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
   const [draftCanvas, setDraftCanvas] = useState<CanvasArtifact | null>(canvas)
   const [isDirty, setIsDirty] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [pptSyncStatus, setPptSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle')
 
   useEffect(() => {
     setDraftCanvas(canvas)
     setIsDirty(false)
     setSaveStatus('idle')
+    setPptSyncStatus('idle')
   }, [canvas?.canvas_id, canvas?.metadata?.version])
 
   if (!canvas) {
@@ -459,6 +462,23 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
     }
   }
 
+  async function applyCanvasToSlides() {
+    if (!task?.id || !currentCanvas || !slides) return
+    setPptSyncStatus('syncing')
+    try {
+      const response = await api.applyCanvasToSlides(task.id, currentCanvas, clientId, deviceType)
+      setCanvas(response.canvas)
+      setDraftCanvas(response.canvas)
+      setSlides(response.slides)
+      setIsDirty(false)
+      setSaveStatus('saved')
+      setPptSyncStatus('synced')
+    } catch (error) {
+      console.error('Failed to sync canvas to PPT:', error)
+      setPptSyncStatus('error')
+    }
+  }
+
   function revertCanvasEdits() {
     setDraftCanvas(canvas)
     setIsDirty(false)
@@ -519,6 +539,8 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
             {isDirty ? ' · 有未保存修改' : ''}
             {saveStatus === 'saved' ? ' · 已保存' : ''}
             {saveStatus === 'error' ? ' · 保存失败' : ''}
+            {pptSyncStatus === 'synced' ? ' · 已同步到 PPT' : ''}
+            {pptSyncStatus === 'error' ? ' · PPT 同步失败' : ''}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -529,6 +551,14 @@ export default function CanvasViewer({ className = '', onOpenArtifact }: CanvasV
             className="rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
           >
             {saveStatus === 'saving' ? '保存中...' : '保存修改'}
+          </button>
+          <button
+            type="button"
+            onClick={applyCanvasToSlides}
+            disabled={!task?.id || !slides || pptSyncStatus === 'syncing'}
+            className="rounded bg-slate-900 px-3 py-1 text-xs text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+          >
+            {pptSyncStatus === 'syncing' ? '同步中...' : '同步到 PPT'}
           </button>
           <button
             type="button"

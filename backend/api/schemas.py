@@ -67,6 +67,12 @@ class CanvasUpdateRequest(BaseModel):
     device_type: Optional[str] = None
 
 
+class CanvasToSlidesRequest(BaseModel):
+    canvas: Optional[Dict[str, Any]] = None
+    client_id: Optional[str] = None
+    device_type: Optional[str] = None
+
+
 class DocumentResponse(BaseModel):
     id: str
     task_id: str
