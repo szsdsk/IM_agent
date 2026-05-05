@@ -152,11 +152,39 @@ class DocTool(BaseTool):
 
     async def _update_document(self, doc_id: str, content: str) -> Dict[str, Any]:
         self._log("info", f"Updating document {doc_id}")
-        return {"success": True, "doc_id": doc_id, "updated": True}
+        from backend.database.connection import async_session_maker
+        from backend.database.models import Document
+        from sqlalchemy import select
+
+        try:
+            async with async_session_maker() as db:
+                result = await db.execute(select(Document).where(Document.id == doc_id))
+                doc = result.scalar_one_or_none()
+                if doc:
+                    doc.content = content
+                    await db.commit()
+                    return {"success": True, "doc_id": doc_id, "updated": True}
+                return {"success": False, "error": f"Document {doc_id} not found"}
+        except Exception as exc:
+            self._log("error", f"Failed to update document {doc_id}: {exc}")
+            return {"success": False, "error": str(exc)}
 
     async def _get_document(self, doc_id: str) -> Dict[str, Any]:
         self._log("info", f"Getting document {doc_id}")
-        return {"success": True, "doc_id": doc_id, "content": ""}
+        from backend.database.connection import async_session_maker
+        from backend.database.models import Document
+        from sqlalchemy import select
+
+        try:
+            async with async_session_maker() as db:
+                result = await db.execute(select(Document).where(Document.id == doc_id))
+                doc = result.scalar_one_or_none()
+                if doc:
+                    return {"success": True, "doc_id": doc.id, "content": doc.content or "", "title": doc.title}
+                return {"success": False, "error": f"Document {doc_id} not found"}
+        except Exception as exc:
+            self._log("error", f"Failed to get document {doc_id}: {exc}")
+            return {"success": False, "error": str(exc)}
 
     async def _simulate_delay(self, seconds: float):
         import asyncio

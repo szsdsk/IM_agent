@@ -1363,7 +1363,14 @@ async def transcribe_voice(
     file: UploadFile = File(...),
     language: str = "zh",
 ):
+    # Validate file size (max 25MB)
+    MAX_VOICE_SIZE = 25 * 1024 * 1024
     audio_bytes = await file.read()
+    if len(audio_bytes) > MAX_VOICE_SIZE:
+        raise HTTPException(status_code=413, detail="Audio file too large (max 25MB)")
+    if len(audio_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
     result = await speech_service.transcribe(
         audio_bytes=audio_bytes,
         filename=file.filename or "voice.ogg",
@@ -1916,6 +1923,9 @@ async def get_slides(slide_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/files/slides/{filename}")
 async def download_slide_file(filename: str):
     """下载后端生成的本地 PPT 文件。"""
+    import re
+    if not re.match(r'^[a-zA-Z0-9\-_\.]+$', filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
     if Path(filename).name != filename:
         raise HTTPException(status_code=400, detail="Invalid file name")
 

@@ -24,7 +24,10 @@ class ToolFactory:
 
     @classmethod
     def get_langchain_tool(cls, tool_name: str):
-        return cls.get_tool(tool_name).langchain_tool
+        tool = cls.get_tool(tool_name)
+        if not hasattr(tool, "langchain_tool"):
+            raise AttributeError(f"Tool {tool_name} has no langchain_tool attribute")
+        return tool.langchain_tool
 
     @classmethod
     async def invoke_tool(cls, tool_name: str, payload: dict):

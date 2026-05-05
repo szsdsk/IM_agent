@@ -283,8 +283,8 @@ class AgentOrchestrator:
                 task_id=current_state["task_id"],
                 delivery=current_state.get("result") or {},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Sync broadcast failed for task %s: %s", current_state["task_id"], exc)
 
         return current_state
 
@@ -313,36 +313,45 @@ class AgentOrchestrator:
         state["status"] = "running"
         state["progress"] = 0.12
 
-        state = await nodes.receive_input(state)
-        state = await nodes.parse_intent(state)
-        await self._publish_progress(room_id, task_id, state, ws_sender)
+        try:
+            state = await nodes.receive_input(state)
+            state = await nodes.parse_intent(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
 
-        if state.get("waiting_for_clarification"):
-            return state
+            if state.get("waiting_for_clarification"):
+                return state
 
-        # 继续执行后续工作流
-        state = await nodes.plan_workflow(state)
-        await self._publish_progress(room_id, task_id, state, ws_sender)
-        if state.get("error"):
-            state = await nodes.deliver_result(state)
-            return state
+            # 继续执行后续工作流
+            state = await nodes.plan_workflow(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+            if state.get("error"):
+                state = await nodes.deliver_result(state)
+                return state
 
-        state = await nodes.extract_tasks(state)
-        await self._publish_progress(room_id, task_id, state, ws_sender)
-        if state.get("error"):
-            return await nodes.deliver_result(state)
+            state = await nodes.extract_tasks(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+            if state.get("error"):
+                return await nodes.deliver_result(state)
 
-        state = await self._execute_agent_plan(state, room_id, task_id, ws_sender)
-        if state.get("error"):
+            state = await self._execute_agent_plan(state, room_id, task_id, ws_sender)
+            if state.get("error"):
+                state = await nodes.deliver_result(state)
+                await self._publish_progress(room_id, task_id, state, ws_sender)
+                return state
+
+            state = await nodes.confirm_or_modify(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+
             state = await nodes.deliver_result(state)
             await self._publish_progress(room_id, task_id, state, ws_sender)
-            return state
-
-        state = await nodes.confirm_or_modify(state)
-        await self._publish_progress(room_id, task_id, state, ws_sender)
-
-        state = await nodes.deliver_result(state)
-        await self._publish_progress(room_id, task_id, state, ws_sender)
+        except Exception as exc:
+            logger.exception("Clarification response workflow failed for task %s", task_id)
+            state["error"] = str(exc)
+            state["status"] = "failed"
+            try:
+                state = await nodes.deliver_result(state)
+            except Exception as deliver_exc:
+                logger.warning("deliver_result also failed for task %s: %s", task_id, deliver_exc)
 
         self._task_status_cache[task_id] = state.get("status", "completed")
         self._task_status_cache = {k: v for k, v in list(self._task_status_cache.items())[-100:]}
@@ -373,8 +382,8 @@ class AgentOrchestrator:
                 task_id=task_id,
                 delivery=state.get("result") or {},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Sync broadcast failed for task %s: %s", task_id, exc)
 
         return state
 
@@ -432,19 +441,25 @@ class AgentOrchestrator:
                 state = await node_fn(state)
                 if state.get("error"):
                     state["status"] = "failed"
-                else:
-                    state["current_step"] = "deliver_result"
-                    state["progress"] = 1.0
-                    state["updated_at"] = datetime.utcnow().isoformat()
-                    await self._publish_progress(room_id, task_id, state, ws_sender)
+                    state = await nodes.deliver_result(state)
+                    return state
 
-                state = await nodes.deliver_result(state)
+                state["current_step"] = "deliver_result"
+                state["progress"] = 1.0
+                state["updated_at"] = datetime.utcnow().isoformat()
+                await self._publish_progress(room_id, task_id, state, ws_sender)
+
+            state = await nodes.deliver_result(state)
 
         except Exception as exc:
             logger.exception("Scene %s execution failed for task %s", scene, task_id)
             state["error"] = str(exc)
             state["status"] = "failed"
             state["updated_at"] = datetime.utcnow().isoformat()
+            try:
+                state = await nodes.deliver_result(state)
+            except Exception as deliver_exc:
+                logger.warning("deliver_result also failed for task %s: %s", task_id, deliver_exc)
 
         completed_message = {
             "type": "task.completed" if state.get("status") == "completed" else "task.failed",
@@ -472,8 +487,8 @@ class AgentOrchestrator:
                 task_id=state["task_id"],
                 delivery=state.get("result") or {},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Sync broadcast failed for task %s: %s", state["task_id"], exc)
 
         return state
 
@@ -815,8 +830,8 @@ class AgentOrchestrator:
                 step_label=progress_message.get("step_label"),
                 status=state.get("status", "running"),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Sync agent progress failed for task %s: %s", task_id, exc)
 
     async def _publish_progress(
         self,
@@ -844,8 +859,8 @@ class AgentOrchestrator:
                 step_label=progress_message.get("step_label"),
                 status=state.get("status", "running"),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Sync progress failed for task %s: %s", task_id, exc)
 
     async def _push_progress_to_im(self, room_id: Optional[str], task_id: str, state: AgentState) -> None:
         if not room_id:
@@ -1251,8 +1266,8 @@ class AgentOrchestrator:
                     task_id=task_id,
                     delivery=state.get("result") or {},
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Sync broadcast failed during feedback for task %s: %s", task_id, exc)
             return state
         except Exception as exc:
             logger.exception("Feedback handling failed for task %s", task_id)
@@ -1279,8 +1294,8 @@ class AgentOrchestrator:
                     status="failed",
                     error=state["error"],
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Sync broadcast failed for failed task %s: %s", task_id, exc)
             return state
 
     @staticmethod

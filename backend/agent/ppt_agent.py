@@ -257,11 +257,12 @@ def structure_node(state: PPTAgentState) -> PPTAgentState:
             # chart 类型细化
             if original_layout == "chart":
                 chart_data = slide.get("chart") or {}
-                chart_type = str(chart_data.get("type", ""))
-                if chart_type == "pie":
-                    mck_method = "donut"
-                elif chart_type == "line":
-                    mck_method = "table_insight"
+                if isinstance(chart_data, dict):
+                    chart_type = str(chart_data.get("type", ""))
+                    if chart_type == "pie":
+                        mck_method = "donut"
+                    elif chart_type == "line":
+                        mck_method = "table_insight"
 
         outline.append({
             "index": idx,

@@ -30,7 +30,12 @@ class Task(Base):
     def progress(self):
         if isinstance(self.result_json, dict):
             return self.result_json.get("progress", 0.0)
-        return 0.0
+        if self.result_json is None:
+            return 0.0
+        try:
+            return float(self.result_json)
+        except (TypeError, ValueError):
+            return 0.0
 
 
 class Document(Base):
