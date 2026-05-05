@@ -180,7 +180,7 @@ class DocTool(BaseTool):
                 result = await db.execute(select(Document).where(Document.id == doc_id))
                 doc = result.scalar_one_or_none()
                 if doc:
-                    return {"success": True, "doc_id": doc.id, "content": doc.content or "", "title": doc.title}
+                    return {"success": True, "doc_id": doc.id, "content": doc.content or "", "lark_doc_url": getattr(doc, "lark_doc_url", None)}
                 return {"success": False, "error": f"Document {doc_id} not found"}
         except Exception as exc:
             self._log("error", f"Failed to get document {doc_id}: {exc}")

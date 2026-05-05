@@ -46,6 +46,15 @@ async def _run_sqlite_schema_patches(conn) -> None:
     if not settings.DATABASE_URL.startswith("sqlite"):
         return
 
+    # Check which tables exist
+    existing_tables = {
+        row[0]
+        for row in (await conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    }
+
+    if "documents" not in existing_tables:
+        return
+
     documents_columns = {
         row[1]
         for row in (await conn.exec_driver_sql("PRAGMA table_info(documents)")).fetchall()
