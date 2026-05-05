@@ -721,6 +721,82 @@ def _fallback_canvas_spec(title: str, intent: str, doc_content: str, steps: Opti
     }
 
 
+def _content_canvas_spec(title: str, intent: str, doc_content: str, steps: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """本地模式下生成内容白板，而不是把 Agent 执行步骤误当成用户要看的画布。"""
+    source = f"{intent}\n{doc_content}".strip()
+    if any(keyword in source for keyword in ["续费", "风险", "规则引擎"]):
+        return _fallback_canvas_spec(title, intent, doc_content, steps)
+
+    topic = _clean_canvas_label(title or intent or "演示主题", 28)
+    points = _extract_canvas_points(source, limit=6)
+    if not points:
+        points = ["背景与目标", "核心观点", "关键论据", "解决方案", "实施路径", "总结与下一步"]
+
+    nodes = [{"id": "topic", "text": topic, "type": "theme", "description": "整份文档和演示稿围绕这一主题展开"}]
+    for index, point in enumerate(points, 1):
+        node_type = "action" if any(word in point for word in ["下一步", "行动", "计划", "落地", "实施"]) else "insight"
+        nodes.append({
+            "id": f"p{index}",
+            "text": _clean_canvas_label(point, 32),
+            "type": node_type,
+            "description": "可同步为 PPT 的结构说明页内容",
+        })
+
+    edges = [
+        {"source": "topic", "target": node["id"], "label": "支撑"}
+        for node in nodes[1:]
+    ]
+    return {
+        "title": f"{topic}：内容结构白板",
+        "diagram_type": "content_map",
+        "nodes": nodes,
+        "edges": edges,
+        "layers": [],
+    }
+
+
+def _extract_canvas_points(source: str, limit: int = 6) -> List[str]:
+    """从文档标题、Markdown 小节和项目符号里提取适合放到白板上的观点。"""
+    points: List[str] = []
+    for raw_line in (source or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^#{1,4}\s*", "", line)
+        line = re.sub(r"^[-*+]\s*", "", line)
+        line = re.sub(r"^\d+[.)、]\s*", "", line)
+        line = line.strip(" ：:")
+        if not line or len(line) < 4:
+            continue
+        if any(skip in line.lower() for skip in ["http://", "https://", "|---", "```"]):
+            continue
+        if any(generic in line for generic in ["生成流程图", "生成画布", "结构图画布"]):
+            continue
+        clauses = [item.strip(" ，。；;,.") for item in re.split(r"[。；;]", line) if item.strip()]
+        for clause in clauses or [line]:
+            if len(clause) < 4:
+                continue
+            if clause not in points:
+                points.append(clause)
+            if len(points) >= limit:
+                break
+        if len(points) >= limit:
+            break
+    if len(points) < 3:
+        for point in _extract_business_points(source, limit=limit):
+            cleaned = _clean_canvas_label(point, 36)
+            if cleaned and cleaned not in points:
+                points.append(cleaned)
+            if len(points) >= limit:
+                break
+    return points[:limit]
+
+
+def _clean_canvas_label(value: str, limit: int = 36) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit].rstrip("，。；,.;") or "核心观点"
+
+
 def _format_im_context_messages(messages: Optional[List[Dict[str, Any]]], current_intent: str = "") -> str:
     lines = []
     for index, message in enumerate(messages or [], 1):
@@ -857,8 +933,9 @@ SYSTEM_PROMPTS = {
     "canvas_generator": """你是一个白板/自由画布规划助手。根据用户需求和文档内容生成可视化结构。
 
 要求：
-- 适合用流程图、架构图或层级图表达
-- diagram_type 使用 flow 或 architecture
+- 优先表达“内容结构、论证关系、演示逻辑”，不要把 Agent 执行步骤当成画布内容
+- diagram_type 优先使用 content_map；只有用户明确要系统架构时用 architecture，明确要业务流程时用 flow
+- content_map 使用中心主题 + 核心观点节点，边表示“支撑/展开/推导”
 - flow 使用 nodes + edges
 - architecture 使用 layers。""",
 
@@ -1181,7 +1258,7 @@ async def generate_canvas_spec(
         "edges": default_edges,
         "layers": [],
     }
-    default = _fallback_canvas_spec(title, intent, doc_content, steps)
+    default = _content_canvas_spec(title, intent, doc_content, steps)
     if not use_llm:
         return default
 
@@ -1190,7 +1267,7 @@ async def generate_canvas_spec(
         f"# User Intent\n{intent}\n\n"
         f"# Workflow Steps\n{json.dumps(steps or [], ensure_ascii=False, indent=2)}\n\n"
         f"# Document\n{doc_content[:4000]}\n\n"
-        "# Task\nCreate a diagram spec for an AFFiNE canvas."
+        "# Task\nCreate a content-first whiteboard spec. Focus on what the PPT should explain, not on backend execution steps."
     )
 
     return await llm_service.structured_chat(
