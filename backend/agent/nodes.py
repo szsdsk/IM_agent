@@ -54,6 +54,115 @@ def _content_types(state: AgentState) -> set[str]:
     return {str(item).strip().lower() for item in state.get("content_types", [])}
 
 
+def _intent_has_any(intent: Any, markers: tuple[str, ...]) -> bool:
+    text = str(intent or "").lower()
+    return any(marker in text for marker in markers)
+
+
+def _normalize_content_types_for_intent(content_types: Any, intent: str) -> list[str]:
+    aliases = {
+        "ppt": "slides",
+        "powerpoint": "slides",
+        "presentation": "slides",
+        "deck": "slides",
+        "slide": "slides",
+        "slides": "slides",
+        "doc": "doc",
+        "document": "doc",
+        "documents": "doc",
+        "prd": "doc",
+        "summary": "doc",
+        "canvas": "canvas",
+        "whiteboard": "canvas",
+        "diagram": "canvas",
+        "flowchart": "canvas",
+        "board": "canvas",
+    }
+    normalized: list[str] = []
+    for item in content_types if isinstance(content_types, list) else []:
+        value = aliases.get(str(item or "").strip().lower())
+        if value and value not in normalized:
+            normalized.append(value)
+
+    wants_deck = _intent_has_any(intent, ("ppt", "powerpoint", "slides", "slide", "deck", "演示稿", "幻灯片"))
+    wants_doc = _intent_has_any(
+        intent,
+        (
+            "文档",
+            "需求文档",
+            "prd",
+            "doc",
+            "document",
+            "说明书",
+            "文章",
+            "报告文档",
+            "报告和",
+            "报告、",
+            "报告，",
+            "报告并",
+        ),
+    )
+    wants_canvas = _intent_has_any(intent, ("canvas", "画布", "流程图", "架构图", "白板"))
+
+    if wants_deck and "slides" not in normalized:
+        normalized.append("slides")
+    if wants_doc and "doc" not in normalized:
+        normalized.append("doc")
+    if wants_canvas and "canvas" not in normalized:
+        normalized.append("canvas")
+
+    # A common IM request is "make a PPT about X"; the planner sometimes adds
+    # a document as an intermediate artifact. Treat it as source material only
+    # unless the user explicitly asked for a separate document/report.
+    if wants_deck and not wants_doc:
+        normalized = [item for item in normalized if item != "doc"]
+
+    if normalized:
+        return normalized
+    return ["slides"] if wants_deck else ["doc", "slides"]
+
+
+def _wants_doc_artifact(state: AgentState) -> bool:
+    return bool(_content_types(state) & {"doc", "document", "documents", "prd", "summary"})
+
+
+def _wants_deck_artifact(state: AgentState) -> bool:
+    markers = {"ppt", "slide", "slides", "deck", "presentation", "powerpoint"}
+    intent = str(state.get("intent", "")).lower()
+    return bool(_content_types(state) & markers) or any(marker in intent for marker in markers)
+
+
+def _wants_canvas_artifact(state: AgentState) -> bool:
+    markers = {"canvas", "whiteboard", "diagram", "flowchart", "board"}
+    intent = str(state.get("intent", "")).lower()
+    return bool(_content_types(state) & markers) or any(marker in intent for marker in markers)
+
+
+def _filter_steps_for_requested_content(state: AgentState, steps: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    filtered: list[Dict[str, Any]] = []
+    for step in steps:
+        module = _normalize_module(step.get("module"))
+        if module == "DOC" and not _wants_doc_artifact(state):
+            continue
+        if module == "DECK" and not _wants_deck_artifact(state):
+            continue
+        if module == "CANVAS" and not _wants_canvas_artifact(state):
+            continue
+        filtered.append(step)
+    return filtered
+
+
+def _default_steps_for_requested_content(state: AgentState) -> list[Dict[str, Any]]:
+    steps: list[Dict[str, Any]] = []
+    if _wants_doc_artifact(state):
+        steps.append({"module": "DOC", "action": "create_doc", "needs_approval": False})
+    if _wants_canvas_artifact(state):
+        steps.append({"module": "CANVAS", "action": "generate_canvas", "needs_approval": False})
+    if _wants_deck_artifact(state):
+        steps.append({"module": "DECK", "action": "generate_slides", "needs_approval": False})
+    return steps or [{"module": "DECK", "action": "generate_slides", "needs_approval": False}]
+
+
 def _intent_with_im_context(state: AgentState) -> str:
     im_context = format_im_context_for_prompt(state.get("im_context_summary"))
     if not im_context:
@@ -181,24 +290,15 @@ def _build_agent_plan(state: AgentState) -> Dict[str, Any]:
 
 
 def needs_doc(state: AgentState) -> bool:
-    markers = {"doc", "document", "documents", "prd", "summary"}
-    return bool(_content_types(state) & markers) or "DOC" in _workflow_modules(state)
+    return _wants_doc_artifact(state) or "DOC" in _workflow_modules(state)
 
 
 def needs_deck(state: AgentState) -> bool:
-    markers = {"ppt", "slide", "slides", "deck", "presentation", "powerpoint"}
-    intent = str(state.get("intent", "")).lower()
-    return bool(_content_types(state) & markers) or "DECK" in _workflow_modules(state) or any(
-        marker in intent for marker in markers
-    )
+    return _wants_deck_artifact(state) or "DECK" in _workflow_modules(state)
 
 
 def needs_canvas(state: AgentState) -> bool:
-    markers = {"canvas", "whiteboard", "diagram", "flowchart", "board"}
-    intent = str(state.get("intent", "")).lower()
-    return bool(_content_types(state) & markers) or "CANVAS" in _workflow_modules(state) or any(
-        marker in intent for marker in markers
-    )
+    return _wants_canvas_artifact(state) or "CANVAS" in _workflow_modules(state)
 
 
 def _normalize_slide_for_frontend(slide: Dict[str, Any], index: int) -> Dict[str, Any]:
@@ -319,7 +419,11 @@ async def parse_intent(state: AgentState) -> AgentState:
         intent_result = await llm_parse_intent(state["intent"], state.get("context_messages", []))
 
         state["intent_analysis"] = intent_result
-        state["content_types"] = intent_result.get("content_types", ["doc", "slides"])
+        state["content_types"] = _normalize_content_types_for_intent(
+            intent_result.get("content_types", ["doc", "slides"]),
+            state["intent"],
+        )
+        intent_result["content_types"] = state["content_types"]
         state["presentation_scene"] = state.get("presentation_scene") or intent_result.get("presentation_scene")
         state["audience"] = intent_result.get("audience", "管理层")
         state["constraints"] = intent_result.get("constraints", [])
@@ -343,7 +447,7 @@ async def parse_intent(state: AgentState) -> AgentState:
     except Exception as exc:
         logger.exception("Error in parse_intent")
         _append_message(state, "assistant", f"分析出错: {str(exc)}", "parse_intent")
-        state["content_types"] = ["doc", "slides"]
+        state["content_types"] = _normalize_content_types_for_intent(["doc", "slides"], state["intent"])
 
     return state
 
@@ -366,6 +470,7 @@ async def plan_workflow(state: AgentState) -> AgentState:
         state["steps"] = plan.get("steps", [])
         for step in state["steps"]:
             step["module"] = _normalize_module(step.get("module"))
+        state["steps"] = _filter_steps_for_requested_content(state, state["steps"])
 
         modules = _workflow_modules(state)
         if needs_doc(state) and "DOC" not in modules:
@@ -404,10 +509,7 @@ async def plan_workflow(state: AgentState) -> AgentState:
     except Exception as exc:
         logger.exception("Error in plan_workflow")
         _append_message(state, "assistant", f"规划出错: {str(exc)}", "plan_workflow")
-        state["steps"] = [
-            {"module": "DOC", "action": "create_doc", "needs_approval": False},
-            {"module": "DECK", "action": "generate_slides", "needs_approval": False},
-        ]
+        state["steps"] = _default_steps_for_requested_content(state)
         state["agent_plan"] = _build_agent_plan(state)
 
     return state

@@ -5,21 +5,34 @@ interface AgentStatusProps {
   className?: string
 }
 
-const stepNames: Record<string, { name: string; icon: string }> = {
-  receive_input: { name: '接收输入', icon: 'IN' },
-  parse_intent: { name: '分析需求', icon: 'AI' },
-  plan_workflow: { name: '规划流程', icon: 'PL' },
-  extract_tasks: { name: '提取任务', icon: 'TK' },
-  generate_doc: { name: '生成文档', icon: 'DOC' },
-  // 与后端 LangGraph 节点保持一致，避免生成画布时状态卡片空白。
-  generate_canvas: { name: '生成画布', icon: 'MAP' },
-  generate_slides: { name: '生成 PPT', icon: 'PPT' },
-  confirm_or_modify: { name: '等待确认', icon: 'OK' },
-  deliver_result: { name: '交付结果', icon: 'END' },
+const agentNames: Record<string, string> = {
+  pilot_agent: 'Pilot Agent',
+  planner_agent: 'Planner Agent',
+  im_context_agent: 'IM Context Agent',
+  doc_agent: 'Doc Agent',
+  canvas_agent: 'Canvas Agent',
+  deck_agent: 'Deck Agent',
+  ppt_agent: 'PPT Agent',
+  rehearsal_agent: 'Rehearsal Agent',
+  delivery_agent: 'Delivery Agent',
+}
+
+const stepNames: Record<string, { agent: string; action: string; icon: string }> = {
+  receive_input: { agent: 'pilot_agent', action: '已接收 IM 指令', icon: 'PI' },
+  parse_intent: { agent: 'pilot_agent', action: '正在理解用户意图', icon: 'PI' },
+  plan_workflow: { agent: 'planner_agent', action: '正在拆解任务并编排流程', icon: 'PL' },
+  extract_tasks: { agent: 'planner_agent', action: '正在生成可执行任务清单', icon: 'PL' },
+  generate_doc: { agent: 'doc_agent', action: '正在生成发布评审文档', icon: 'DOC' },
+  generate_canvas: { agent: 'canvas_agent', action: '正在生成流程图画布', icon: 'MAP' },
+  generate_slides: { agent: 'deck_agent', action: '正在生成管理层汇报 PPT', icon: 'PPT' },
+  generate_rehearsal: { agent: 'rehearsal_agent', action: '正在准备讲稿与 Q&A', icon: 'QA' },
+  prepare_delivery: { agent: 'delivery_agent', action: '正在归档并准备回传飞书', icon: 'DL' },
+  confirm_or_modify: { agent: 'pilot_agent', action: '等待确认或修改意见', icon: 'OK' },
+  deliver_result: { agent: 'delivery_agent', action: '正在交付结果', icon: 'END' },
 }
 
 export default function AgentStatus({ className = '' }: AgentStatusProps) {
-  const { currentStep, progress, status, wsConnected } = useSessionStore()
+  const { currentStep, activeAgent, progressMessage, progress, status, wsConnected } = useSessionStore()
 
   const getStatusColor = () => {
     switch (status) {
@@ -57,6 +70,9 @@ export default function AgentStatus({ className = '' }: AgentStatusProps) {
   }
 
   const currentStepInfo = currentStep ? stepNames[currentStep] : null
+  const agentKey = activeAgent || currentStepInfo?.agent || ''
+  const agentLabel = agentNames[agentKey] || agentKey || 'Agent'
+  const actionLabel = progressMessage || currentStepInfo?.action || ''
 
   return (
     <div className={`bg-white border rounded-lg p-4 shadow-sm ${className}`}>
@@ -87,7 +103,10 @@ export default function AgentStatus({ className = '' }: AgentStatusProps) {
             <span className="inline-flex h-9 min-w-9 items-center justify-center rounded bg-blue-50 px-2 text-xs font-semibold text-blue-600">
               {currentStepInfo.icon}
             </span>
-            <span className="font-medium text-gray-700">{currentStepInfo.name}</span>
+            <div className="min-w-0">
+              <div className="font-semibold text-gray-800">{agentLabel}</div>
+              <div className="truncate text-sm text-gray-500">{actionLabel}</div>
+            </div>
           </div>
 
           <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">

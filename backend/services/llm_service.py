@@ -6,6 +6,7 @@ the Agent nodes can be migrated without changing API responses.
 """
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Dict, List, Optional, Type
 
 from pydantic import BaseModel, Field
@@ -348,27 +349,113 @@ def get_scene_profile(scene: Optional[str]) -> Dict[str, Any]:
 
 def _clean_content_line(line: str) -> str:
     text = str(line or "").strip()
+    text = re.sub(r"^\[Mock\]\s*已处理[:：]\s*", "", text).strip()
     for prefix in ("-", "*", "✅", "❌", "🔹", "1.", "2.", "3.", "4.", "5.", "6.", "7."):
         if text.startswith(prefix):
             text = text[len(prefix):].strip()
     return text.strip("| ").replace("  ", " ")
 
 
+def _strip_speaker_prefix(text: str) -> str:
+    return re.sub(
+        r"^(产品经理|业务负责人|研发负责人|算法同学|设计同学|客服负责人|法务同学|项目经理|销售负责人|数据同学|运营同学|运营|客户成功经理|客户成功)[:：]\s*",
+        "",
+        str(text or "").strip(),
+    )
+
+
+def _looks_like_instruction_line(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return True
+    instruction_prefixes = (
+        "# 任务",
+        "请根据",
+        "请先",
+        "不用生成",
+        "生成文档标题",
+        "用户需求",
+        "飞书群聊上下文",
+        "群聊上下文",
+        "实际内容",
+        "产出要求",
+        "输出要求",
+    )
+    if text.startswith(instruction_prefixes):
+        return True
+    return bool(re.match(r"^\d+\.\s*(文档|画布|PPT|讲稿|演示稿)", text))
+
+
+def _derive_topic(title: str = "", source: str = "") -> str:
+    text = f"{title}\n{source}"
+    patterns = [
+        r"上线[“\"]([^”\"]{2,40})[”\"]",
+        r"主题是[“\"]([^”\"]{2,40})[”\"]",
+        r"主题为[“\"]([^”\"]{2,40})[”\"]",
+        r"围绕[“\"]([^”\"]{2,40})[”\"]",
+        r"“([^”]{2,40})”",
+        r"\"([^\"]{2,40})\"",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).strip()
+
+    clean_title = str(title or "").strip()
+    if clean_title and len(clean_title) <= 40 and not _looks_like_instruction_line(clean_title):
+        return clean_title
+
+    for raw_line in text.splitlines():
+        line = _clean_content_line(raw_line)
+        if not line or _looks_like_instruction_line(line):
+            continue
+        if "：" in line:
+            line = line.split("：", 1)[1].strip()
+        elif ":" in line:
+            line = line.split(":", 1)[1].strip()
+        if line:
+            return line[:32]
+    return "项目方案"
+
+
+def _extract_requested_flow_nodes(source: str) -> List[str]:
+    match = re.search(r"画布用流程图表达[：:]\s*([^\n。]+)", source or "")
+    if not match:
+        return []
+    raw = match.group(1)
+    parts = [
+        item.strip(" 。；;")
+        for item in re.split(r"、|，|,|→|->", raw)
+        if item.strip(" 。；;")
+    ]
+    return parts[:8]
+
+
 def _extract_business_points(content: str, limit: int = 18) -> List[str]:
     keywords = [
         "提前", "风险", "续费", "召回", "投诉", "ARR", "MVP", "规则", "飞书", "客户成功",
         "登录", "工单", "合同", "使用率", "里程碑", "灰度", "准确率", "收益", "目标",
+        "会议", "纪要", "行动项", "发言人", "录音", "权限", "合规", "脱敏", "审计",
+        "多端", "移动端", "桌面端", "效率", "遗漏", "任务", "低置信度", "确认",
+        "回滚", "试点", "上线", "两周", "负责人", "截止时间", "依赖",
     ]
     points: List[str] = []
+    seen: set[str] = set()
     for raw_line in (content or "").splitlines():
         line = _clean_content_line(raw_line)
         if not line or len(line) < 6:
             continue
+        if _looks_like_instruction_line(line):
+            continue
+        line = _strip_speaker_prefix(line)
         if line.startswith(("#", "flowchart", "A[", "B[", "C{")):
             continue
         if set(line) <= {"|", "-", " "}:
             continue
+        if line in seen:
+            continue
         if any(keyword in line for keyword in keywords) or len(points) < 4:
+            seen.add(line)
             points.append(line[:120])
         if len(points) >= limit:
             break
@@ -376,8 +463,67 @@ def _extract_business_points(content: str, limit: int = 18) -> List[str]:
 
 
 def _pick_points(points: List[str], keywords: List[str], fallback: List[str], limit: int = 4) -> List[str]:
-    picked = [point for point in points if any(keyword in point for keyword in keywords)]
-    return (picked or fallback)[:limit]
+    picked = []
+    for point in points:
+        if any(keyword in point for keyword in keywords) and point not in picked:
+            picked.append(point)
+    values = picked or fallback
+    deduped = []
+    for value in values:
+        if value and value not in deduped:
+            deduped.append(value)
+    return deduped[:limit]
+
+
+def _merge_points(*groups: List[str], limit: int = 6) -> List[str]:
+    merged: List[str] = []
+    for group in groups:
+        for item in group:
+            if item and item not in merged:
+                merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _fallback_doc_content(title: str, intent: str, outline: Optional[Dict] = None) -> str:
+    topic = _derive_topic(title, intent)
+    points = _extract_business_points(intent, limit=8)
+    if not points:
+        points = [topic]
+
+    outline_sections = []
+    if isinstance(outline, dict):
+        for value in outline.values():
+            if isinstance(value, list):
+                outline_sections.extend(str(item) for item in value[:4])
+            elif value:
+                outline_sections.append(str(value))
+
+    goals = _pick_points(points, ["目标", "提升", "降低", "效率", "遗漏", "及时"], [f"围绕「{topic}」提升协作效率和交付质量"], limit=4)
+    scope = _pick_points(points, ["第一版", "覆盖", "MVP", "桌面端", "移动端", "同步", "抽取"], points[:4], limit=5)
+    compliance = _pick_points(points, ["权限", "合规", "敏感", "脱敏", "审计"], ["继承原有权限边界，对敏感内容给出脱敏提示，并记录关键操作审计"], limit=3)
+    risks = _pick_points(points, ["风险", "低置信度", "误判", "不做", "回滚"], ["低置信度结果需要人工确认，试点期保留人工编辑和回滚方案"], limit=4)
+    milestones = _pick_points(points, ["两周", "试点", "上线", "里程碑", "第"], ["两周内完成 MVP，并在小范围团队试点后复盘"], limit=4)
+
+    lines = [f"# {topic} 发布评审文档", "", "## 背景与目标"]
+    lines.extend(f"- {point}" for point in goals)
+    lines.append("")
+    lines.append("## 用户角色与关键诉求")
+    lines.extend(f"- {point}" for point in points[:5])
+    lines.append("")
+    lines.append("## MVP 范围")
+    lines.extend(f"- {point}" for point in scope)
+    lines.append("")
+    lines.append("## 权限与合规")
+    lines.extend(f"- {point}" for point in compliance)
+    lines.append("")
+    lines.append("## 风险与缓解")
+    lines.extend(f"- {point}" for point in risks)
+    lines.append("")
+    lines.append("## 里程碑")
+    lines.extend(f"- {point}" for point in milestones)
+    return "\n".join(lines).strip()
 
 
 def _fallback_deck_spec(
@@ -387,35 +533,83 @@ def _fallback_deck_spec(
     scene_key: str,
     scene_profile: Dict[str, Any],
 ) -> Dict[str, Any]:
+    topic = _derive_topic(title, doc_content)
+    source = f"{title}\n{doc_content}"
     points = _extract_business_points(doc_content)
-    pain_points = _pick_points(
-        points,
-        ["滞后", "投诉", "人工", "痛点", "重复", "效率"],
-        ["高风险客户识别滞后，挽回窗口不足", "跨部门重复触达影响客户体验", "人工排查占用客户成功大量时间"],
-    )
-    goals = _pick_points(
-        points,
-        ["目标", "提前", "召回", "投诉率", "ARR", "人效"],
-        ["提前14天识别高风险续费客户", "上线首月高风险客户召回率提升30%", "重复触达投诉率降至5%以下"],
-    )
-    scope = _pick_points(
-        points,
-        ["登录", "工单", "合同", "使用率", "风险标签", "跟进话术", "飞书"],
-        ["接入登录频次、工单数量、合同到期时间、核心功能使用率四类信号", "提供风险标签、原因解释和标准化跟进建议", "飞书群和工作台双渠道提醒"],
-    )
-    rollout = _pick_points(
-        points,
-        ["第1", "第4", "第11", "第13", "两周", "14天", "灰度"],
-        ["第1-3天完成需求评审和规则定稿", "第4-10天完成功能开发和联调", "第11-14天完成灰度测试与全量上线"],
-    )
-    risks = _pick_points(
-        points,
-        ["误判", "准确率", "跟进不及时", "数据缺失", "风险描述"],
-        ["规则准确率低：灰度期10%客户验证并周度优化", "跟进不及时：24小时未跟进触发二次提醒", "数据缺失：标记待确认并人工补全"],
-    )
+    is_renewal_risk = "续费" in source and ("客户" in source or "风险" in source)
+
+    if is_renewal_risk:
+        pain_points = _pick_points(
+            points,
+            ["滞后", "投诉", "人工", "痛点", "重复", "效率"],
+            ["高风险客户识别滞后，挽回窗口不足", "跨部门重复触达影响客户体验", "人工排查占用客户成功大量时间"],
+        )
+        goals = _pick_points(
+            points,
+            ["目标", "提前", "召回", "投诉率", "ARR", "人效"],
+            ["提前14天识别高风险续费客户", "上线首月高风险客户召回率提升30%", "重复触达投诉率降至5%以下"],
+        )
+        scope = _pick_points(
+            points,
+            ["登录", "工单", "合同", "使用率", "风险标签", "跟进话术", "飞书"],
+            ["接入登录频次、工单数量、合同到期时间、核心功能使用率四类信号", "提供风险标签、原因解释和标准化跟进建议", "飞书群和工作台双渠道提醒"],
+        )
+        rollout = _pick_points(
+            points,
+            ["第1", "第4", "第11", "第13", "两周", "14天", "灰度"],
+            ["第1-3天完成需求评审和规则定稿", "第4-10天完成功能开发和联调", "第11-14天完成灰度测试与全量上线"],
+        )
+        risks = _pick_points(
+            points,
+            ["误判", "准确率", "跟进不及时", "数据缺失", "风险描述"],
+            ["规则准确率低：灰度期10%客户验证并周度优化", "跟进不及时：24小时未跟进触发二次提醒", "数据缺失：标记待确认并人工补全"],
+        )
+        deck_title = "客户续费风险预警MVP项目汇报"
+        cover_content = "2周上线，提前14天识别高风险客户"
+        cover_bullets = ["2周上线", "提前14天识别高风险客户", "管理层决策汇报"]
+        qa_bullets = ["为什么第一版采用规则引擎？", "如何避免重复触达客户？", "投入产出比如何？"]
+    else:
+        pain_points = _pick_points(
+            points,
+            ["效率", "遗漏", "人工", "耗时", "及时", "管理层"],
+            [f"{topic}需要降低人工整理成本", "跨部门行动项需要可追踪、可确认、可回流", "管理层需要看到价值、范围和风险边界"],
+        )
+        goals = _pick_points(
+            points,
+            ["目标", "降低", "提升", "5分钟", "30分钟", "及时率", "遗漏率"],
+            [f"{topic}围绕效率提升和事项闭环建立 MVP", "先在小范围团队试点验证价值", "用自动化减少会后重复整理"],
+        )
+        scope = _pick_points(
+            points,
+            ["第一版", "覆盖", "MVP", "录音", "发言人", "行动项", "桌面端", "移动端", "同步"],
+            [f"围绕 {topic} 实现核心生成、确认和回传能力", "桌面端负责预览编辑，移动端负责轻量确认", "结果回到飞书原会话形成协同闭环"],
+        )
+        flow_nodes = _extract_requested_flow_nodes(source)
+        if not flow_nodes and any(keyword in source for keyword in ["会议纪要", "会议", "纪要", "行动项"]):
+            flow_nodes = ["IM触发", "会议内容解析", "文档生成", "行动项确认", "PPT生成", "飞书交付", "归档复盘"]
+        flow_points = [f"{index + 1}. {node}" for index, node in enumerate(flow_nodes)]
+        rollout = _pick_points(
+            points,
+            ["两周", "试点", "上线", "里程碑", "回滚", "MVP", "第"],
+            ["两周内完成 MVP", "先在 3 个内部团队试点", "上线前准备风险清单和回滚方案"],
+        )
+        risks = _pick_points(
+            points,
+            ["风险", "低置信度", "误判", "敏感", "权限", "合规", "脱敏", "审计", "回滚"],
+            ["低置信度内容进入人工确认", "敏感内容保留权限继承和脱敏提示", "保留人工编辑和回滚方案"],
+        )
+        deck_title = f"{topic}MVP上线汇报"
+        cover_content = "从 IM 触发到文档、画布、PPT 和交付归档的 Agent 闭环"
+        cover_bullets = ["Agent 自动化闭环", "多端协作确认", "管理层决策汇报"]
+        qa_bullets = ["MVP 范围为什么这样收敛？", "如何控制低置信度结果？", "试点成功的判断标准是什么？"]
+
+    background_bullets = _merge_points(pain_points, goals[:2], limit=5)
+    scope_bullets = _merge_points(scope, limit=5)
+    process_bullets = _merge_points((flow_points if not is_renewal_risk else []), scope, limit=6)
+    risk_bullets = _merge_points(rollout[:3], risks[:3], limit=6)
 
     return {
-        "title": "客户续费风险预警MVP项目汇报" if "续费" in doc_content else title,
+        "title": deck_title,
         "audience": audience,
         "duration_minutes": scene_profile["duration_minutes"],
         "theme": scene_profile["theme"],
@@ -428,16 +622,16 @@ def _fallback_deck_spec(
         "slides": [
             {
                 "index": 0,
-                "title": "客户续费风险预警MVP项目汇报" if "续费" in doc_content else title,
+                "title": deck_title,
                 "layout": "title",
-                "content": "2周上线，提前14天识别高风险客户",
-                "bullets": ["2周上线", "提前14天识别高风险客户", "管理层决策汇报"],
+                "content": cover_content,
+                "bullets": cover_bullets,
             },
-            {"index": 1, "title": "项目背景与业务价值", "layout": "content", "content": "\n".join(pain_points + goals[:2]), "bullets": pain_points + goals[:2]},
-            {"index": 2, "title": "MVP核心能力", "layout": "content", "content": "\n".join(scope), "bullets": scope},
-            {"index": 3, "title": "落地路径与资源投入", "layout": "content", "content": "\n".join(rollout), "bullets": rollout},
-            {"index": 4, "title": "预期收益与风险控制", "layout": "two_column", "content": "\n".join(goals + risks), "bullets": goals[:3] + risks[:3]},
-            {"index": 5, "title": "Q&A", "layout": "content", "content": "请各位领导指示", "bullets": ["为什么第一版采用规则引擎？", "如何避免重复触达客户？", "投入产出比如何？"]},
+            {"index": 1, "title": "项目背景与业务价值", "layout": "content", "content": "\n".join(background_bullets), "bullets": background_bullets},
+            {"index": 2, "title": "MVP核心能力", "layout": "content", "content": "\n".join(scope_bullets), "bullets": scope_bullets},
+            {"index": 3, "title": "Agent自动化闭环", "layout": "process", "content": "\n".join(process_bullets), "bullets": process_bullets},
+            {"index": 4, "title": "落地节奏与风险控制", "layout": "two_column", "content": "\n".join(risk_bullets), "bullets": risk_bullets},
+            {"index": 5, "title": "管理层关注与Q&A", "layout": "content", "content": "请各位领导指示", "bullets": qa_bullets},
         ],
     }
 
@@ -468,8 +662,8 @@ def _enrich_deck_spec(candidate: Dict[str, Any], fallback: Dict[str, Any]) -> Di
 
 
 def _fallback_canvas_spec(title: str, intent: str, doc_content: str, steps: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    combined = f"{intent}\n{doc_content}"
-    if any(keyword in combined for keyword in ["续费", "风险", "飞书", "规则引擎"]):
+    combined = f"{title}\n{intent}\n{doc_content}"
+    if "续费" in combined and ("风险" in combined or "客户" in combined):
         nodes = [
             {"id": "n1", "text": "采集客户行为与合同数据", "type": "input"},
             {"id": "n2", "text": "规则引擎计算风险分值", "type": "process"},
@@ -488,6 +682,24 @@ def _fallback_canvas_spec(title: str, intent: str, doc_content: str, steps: Opti
             {"source": "n6", "target": "n7", "label": "跟进记录"},
             {"source": "n7", "target": "n2", "label": "规则迭代"},
         ]
+    elif any(keyword in combined for keyword in ["会议纪要", "会议", "纪要", "行动项", "发言人", "录音"]):
+        labels = _extract_requested_flow_nodes(combined) or [
+            "IM触发",
+            "会议内容解析",
+            "文档生成",
+            "行动项确认",
+            "PPT生成",
+            "飞书交付",
+            "归档复盘",
+        ]
+        nodes = [
+            {"id": f"n{index + 1}", "text": label, "type": "process"}
+            for index, label in enumerate(labels)
+        ]
+        edges = [
+            {"source": nodes[index]["id"], "target": nodes[index + 1]["id"], "label": ""}
+            for index in range(max(len(nodes) - 1, 0))
+        ]
     else:
         step_labels = [
             str(step.get("action") or step.get("module") or f"Step {index + 1}")
@@ -501,7 +713,7 @@ def _fallback_canvas_spec(title: str, intent: str, doc_content: str, steps: Opti
         ]
 
     return {
-        "title": "客户续费风险预警全流程闭环流程图" if "续费" in combined else title or "Agent-Pilot 结构图",
+        "title": "客户续费风险预警全流程闭环流程图" if "续费" in combined else f"{_derive_topic(title, combined)}流程闭环图",
         "diagram_type": "flow",
         "nodes": nodes,
         "edges": edges,
@@ -524,20 +736,23 @@ def _format_im_context_messages(messages: Optional[List[Dict[str, Any]]], curren
 def _fallback_im_context_summary(messages: Optional[List[Dict[str, Any]]], current_intent: str = "") -> Dict[str, Any]:
     text = _format_im_context_messages(messages, current_intent)
     source = text or current_intent
+    topic = _derive_topic(current_intent, source)
     points = _extract_business_points(source, limit=24)
 
     stakeholders = []
-    for marker in ["产品经理", "销售负责人", "数据同学", "客服负责人", "客户成功", "研发负责人", "设计同学", "运营"]:
+    for marker in ["产品经理", "业务负责人", "销售负责人", "数据同学", "算法同学", "客服负责人", "客户成功", "研发负责人", "设计同学", "法务同学", "项目经理", "运营"]:
         if marker in source and marker not in stakeholders:
             stakeholders.append(marker)
 
+    is_renewal_risk = "续费" in source and ("客户" in source or "风险" in source)
+
     return {
-        "summary": "团队正在讨论客户续费风险预警能力，目标是提前识别高风险客户，并通过文档、画布和汇报材料沉淀方案。" if "续费" in source else (points[0] if points else source[:160]),
-        "topics": _pick_points(points, ["续费", "风险", "预警", "飞书", "MVP"], ["客户续费风险预警", "跨部门协同", "MVP落地"]),
-        "decisions": _pick_points(points, ["第一版", "规则引擎", "两周", "MVP", "不做"], ["第一版采用规则引擎", "两周内完成MVP"]),
-        "requirements": _pick_points(points, ["希望", "需要", "目标", "页面", "信号", "推送"], ["展示风险等级、关键原因和建议跟进动作", "推送到飞书群", "生成客户列表、风险标签和跟进话术"]),
-        "risks": _pick_points(points, ["重复", "打扰", "投诉", "复杂", "滞后"], ["避免重复触达客户", "控制MVP范围，不引入复杂机器学习模型"]),
-        "todos": _pick_points(points, ["完成", "上线", "评审", "联调", "灰度"], ["确认风险判定规则", "完成MVP开发和灰度验证"]),
+        "summary": "团队正在讨论客户续费风险预警能力，目标是提前识别高风险客户，并通过文档、画布和汇报材料沉淀方案。" if is_renewal_risk else (f"团队正在讨论{topic}，需要沉淀文档、画布和汇报材料。" if topic else (points[0] if points else source[:160])),
+        "topics": _pick_points(points, ["续费", "风险", "预警", "飞书", "MVP", "会议", "纪要", "行动项"], [topic, "跨部门协同", "MVP落地"]),
+        "decisions": _pick_points(points, ["第一版", "规则引擎", "两周", "MVP", "不做", "覆盖", "试点"], ["第一版收敛MVP范围", "两周内完成MVP"]),
+        "requirements": _pick_points(points, ["希望", "需要", "目标", "页面", "信号", "推送", "桌面端", "移动端", "确认"], [f"围绕{topic}生成可交付材料", "推送到飞书群", "支持多端协作确认"]),
+        "risks": _pick_points(points, ["重复", "打扰", "投诉", "复杂", "滞后", "敏感", "低置信度", "权限", "回滚"], ["控制MVP范围", "低置信度内容需要人工确认"]),
+        "todos": _pick_points(points, ["完成", "上线", "评审", "联调", "灰度", "试点", "两周"], ["确认MVP范围", "完成试点和复盘验证"]),
         "stakeholders": stakeholders,
         "open_questions": [],
         "source_message_count": len(messages or []),
@@ -736,15 +951,27 @@ async def summarize_im_context(
 
 async def plan_workflow(intent: str, context: Optional[Dict] = None) -> Dict[str, Any]:
     scene = (context or {}).get("presentation_scene")
+    content_types = {str(item).strip().lower() for item in (context or {}).get("content_types", [])}
+    wants_doc = bool(content_types & {"doc", "document", "documents", "prd", "summary"})
+    wants_slides = bool(content_types & {"ppt", "slide", "slides", "deck", "presentation", "powerpoint"})
+    wants_canvas = bool(content_types & {"canvas", "whiteboard", "diagram", "flowchart", "board"})
+    default_steps = []
+    default_artifacts = []
+    if wants_doc:
+        default_steps.append({"module": "DOC", "action": "create_doc", "needs_approval": False})
+        default_artifacts.append("document")
+    if wants_canvas:
+        default_steps.append({"module": "CANVAS", "action": "generate_canvas", "needs_approval": False})
+        default_artifacts.append("canvas")
+    if wants_slides or not default_steps:
+        default_steps.append({"module": "DECK", "action": "generate_slides", "needs_approval": False})
+        default_artifacts.append("slides")
     default = {
         "goal": intent,
         "presentation_scene": scene,
         "audience": (context or {}).get("audience", "管理层"),
-        "artifacts": ["document", "slides"],
-        "steps": [
-            {"module": "DOC", "action": "create_doc", "needs_approval": True},
-            {"module": "DECK", "action": "generate_slides", "needs_approval": False},
-        ],
+        "artifacts": default_artifacts,
+        "steps": default_steps,
     }
     content = f"用户需求：{intent}"
     if context:
@@ -767,7 +994,10 @@ async def generate_doc_content(title: str, intent: str, outline: Optional[Dict] 
         [{"role": "user", "content": prompt}],
         system_prompt=SYSTEM_PROMPTS["doc_writer"],
     )
-    return response.get("content", "")
+    content = str(response.get("content") or "").strip()
+    if content.startswith("[Mock]"):
+        return _fallback_doc_content(title, intent, outline)
+    return content or _fallback_doc_content(title, intent, outline)
 
 
 async def generate_deck_spec(
@@ -780,9 +1010,10 @@ async def generate_deck_spec(
     scene_profile = get_scene_profile(scene_key)
     audience = audience or scene_profile["audience"]
     outline = scene_profile["outline"]
+    safe_title = _derive_topic(title, doc_content)
 
     default = {
-        "title": title,
+        "title": safe_title,
         "audience": audience,
         "duration_minutes": scene_profile["duration_minutes"],
         "theme": scene_profile["theme"],
@@ -792,7 +1023,7 @@ async def generate_deck_spec(
             "scene_label": scene_profile["label"],
         },
         "slides": [
-            {"index": 0, "title": title, "layout": "title", "content": scene_profile["label"], "bullets": [scene_profile["label"]]},
+            {"index": 0, "title": safe_title, "layout": "title", "content": scene_profile["label"], "bullets": [scene_profile["label"]]},
             {"index": 1, "title": outline[0], "layout": "content", "content": "开场与结论", "bullets": [f"场景：{scene_profile['label']}", f"受众：{audience}"]},
             {"index": 2, "title": outline[1], "layout": "content", "content": "背景与上下文", "bullets": []},
             {"index": 3, "title": outline[2], "layout": "two_column", "content": "核心结构", "bullets": []},
@@ -800,9 +1031,9 @@ async def generate_deck_spec(
             {"index": 5, "title": outline[-1], "layout": "content", "content": "行动与收尾", "bullets": []},
         ],
     }
-    default = _fallback_deck_spec(title, doc_content, audience, scene_key, scene_profile)
+    default = _fallback_deck_spec(safe_title, doc_content, audience, scene_key, scene_profile)
     prompt = (
-        f"文档标题：{title}\n\n"
+        f"文档标题：{safe_title}\n\n"
         f"文档内容：\n{doc_content[:4000]}\n\n"
         f"目标受众：{audience}\n"
         f"演示场景：{scene_key}\n"

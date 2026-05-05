@@ -198,6 +198,9 @@ export interface WebSocketMessage {
   device_type?: string
   step?: string
   message?: string
+  active_agent?: string
+  agent_label?: string
+  step_label?: string
   progress?: number
   status?: string
   data?: Record<string, any>

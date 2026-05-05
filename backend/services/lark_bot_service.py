@@ -749,14 +749,17 @@ def markdown_to_lark_blocks(markdown: str) -> List[Dict[str, Any]]:
 def build_progress_card(task_id: str, step: str, progress: float) -> Dict[str, Any]:
     """构建任务进度卡片。"""
     step_names = {
-        "receive_input": "接收输入",
-        "parse_intent": "分析需求",
-        "plan_workflow": "规划流程",
-        "extract_tasks": "提取任务",
-        "generate_doc": "生成文档",
-        "generate_slides": "生成 PPT",
-        "confirm_or_modify": "等待确认",
-        "deliver_result": "交付结果",
+        "receive_input": "Pilot Agent：已接收 IM 指令",
+        "parse_intent": "Pilot Agent：正在理解用户意图",
+        "plan_workflow": "Planner Agent：正在拆解任务并编排流程",
+        "extract_tasks": "Planner Agent：正在生成可执行任务清单",
+        "generate_doc": "Doc Agent：正在生成发布评审文档",
+        "generate_canvas": "Canvas Agent：正在生成流程图画布",
+        "generate_slides": "Deck Agent：正在生成管理层汇报 PPT",
+        "generate_rehearsal": "Rehearsal Agent：正在准备讲稿与 Q&A",
+        "prepare_delivery": "Delivery Agent：正在归档并准备回传飞书",
+        "confirm_or_modify": "Pilot Agent：等待确认或修改意见",
+        "deliver_result": "Delivery Agent：正在交付结果",
     }
     step_name = step_names.get(step, step)
     pct = int(progress * 100)

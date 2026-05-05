@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from backend.services.llm_service import IntentAnalysis, LLMService
+from backend.services.llm_service import IntentAnalysis, LLMService, generate_doc_content
 
 
 class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -25,6 +26,19 @@ class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, default)
+
+    async def test_generate_doc_content_falls_back_when_llm_returns_empty(self):
+        with patch(
+            "backend.services.llm_service.llm_service.chat",
+            new=AsyncMock(return_value={"error": "provider error"}),
+        ):
+            content = await generate_doc_content(
+                "王者荣耀中路英雄介绍",
+                "给我做一个王者荣耀中路英雄介绍的PPT",
+            )
+
+        self.assertIn("# 王者荣耀中路英雄介绍", content)
+        self.assertIn("背景与目标", content)
 
 
 if __name__ == "__main__":

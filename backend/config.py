@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     LARK_DOC_FOLDER_TOKEN: Optional[str] = None
 
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 8080
 
     @field_validator("DEBUG", mode="before")
     @classmethod

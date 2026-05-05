@@ -10,7 +10,11 @@ class WebSocketService {
   private reconnectTimer: number | null = null
 
   connect(sessionId: string): void {
-    if (this.ws?.readyState === WebSocket.OPEN && this.sessionId === sessionId) {
+    const sameSession = this.sessionId === sessionId
+    const alreadyActive =
+      this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING
+
+    if (sameSession && alreadyActive) {
       return
     }
 
@@ -118,6 +122,10 @@ class WebSocketService {
         const progress = data.progress ?? payload.progress
         const status = data.status ?? payload.status
         const message = data.message ?? payload.message
+        const activeAgent = data.active_agent ?? payload.active_agent ?? ''
+        const progressMessage = data.agent_label && data.step_label
+          ? `${data.agent_label}：${data.step_label}`
+          : message || ''
 
         if (data.task_id) {
           store.setTask({
@@ -133,6 +141,8 @@ class WebSocketService {
           })
         }
         if (step) store.setCurrentStep(step)
+        if (activeAgent) store.setActiveAgent(activeAgent)
+        if (progressMessage) store.setProgressMessage(progressMessage)
         if (progress !== undefined) store.setProgress(progress)
         if (status) store.setStatus(status as SessionStatus)
 

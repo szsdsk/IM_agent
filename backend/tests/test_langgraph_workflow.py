@@ -65,6 +65,23 @@ class LangGraphRoutingTests(unittest.TestCase):
         self.assertEqual(plan["tasks"][3]["step"], "prepare_delivery")
         self.assertIn("sync_agent", plan["agents"])
 
+    def test_ppt_only_request_drops_planner_doc_step(self):
+        intent = "给我做一个王者荣耀中路英雄介绍的PPT"
+        state = {
+            "intent": intent,
+            "content_types": nodes._normalize_content_types_for_intent(["doc", "slides"], intent),
+        }
+        steps = nodes._filter_steps_for_requested_content(
+            state,
+            [
+                {"module": "DOC", "action": "create_doc"},
+                {"module": "DECK", "action": "generate_slides"},
+            ],
+        )
+
+        self.assertEqual(state["content_types"], ["slides"])
+        self.assertEqual([step["module"] for step in steps], ["DECK"])
+
 
 class FeedbackRevisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_slide_feedback_handles_deck_without_document(self):
@@ -257,6 +274,39 @@ class ContentAwareGenerationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DeliveryResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ppt_agent_subgraph_formats_im_context_before_fallback(self):
+        from backend.agent.orchestrator import AgentOrchestrator
+
+        orchestrator = AgentOrchestrator()
+        state = {
+            "task_id": "task_ppt",
+            "intent": "生成投资方汇报 PPT",
+            "audience": "投资方",
+            "presentation_scene": "management_briefing",
+            "messages": [],
+            "updated_at": "",
+            "doc_content": {"content": "文档正文"},
+            "deck_spec": {"title": "投资方汇报", "slides": []},
+            "im_context_summary": {
+                "summary": "强调商业化进展",
+                "requirements": ["补充增长数据"],
+                "decisions": [],
+                "todos": [],
+            },
+        }
+
+        with patch(
+            "backend.agent.ppt_agent.run_ppt_agent",
+            new=AsyncMock(return_value={"error": "mck_ppt not installed"}),
+        ), patch(
+            "backend.agent.nodes.generate_slides",
+            new=AsyncMock(return_value={**state, "slides_content": {"slides": []}}),
+        ) as generate_slides:
+            result = await orchestrator._run_ppt_agent_subgraph(state)
+
+        self.assertIn("slides_content", result)
+        generate_slides.assert_awaited_once()
+
     async def test_delivery_result_keeps_lark_doc_fields(self):
         state = {
             "task_id": "task_doc",

@@ -103,8 +103,14 @@ class SyncService:
         try:
             import redis.asyncio as redis
 
-            self._redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
-            await self._redis_client.ping()
+            self._redis_client = redis.Redis(
+                host="localhost",
+                port=6379,
+                decode_responses=True,
+                socket_connect_timeout=1,
+                socket_timeout=1,
+            )
+            await asyncio.wait_for(self._redis_client.ping(), timeout=2)
             self._pubsub = self._redis_client.pubsub()
             self._use_memory_mode = False
             logger.info("Redis sync enabled")
@@ -279,6 +285,9 @@ class SyncService:
         progress: float,
         message: str,
         client_id: Optional[str] = None,
+        active_agent: Optional[str] = None,
+        agent_label: Optional[str] = None,
+        step_label: Optional[str] = None,
     ) -> None:
         """广播任务进度。"""
         await self.publish(
@@ -291,6 +300,9 @@ class SyncService:
                 "progress": progress,
                 "message": message,
                 "status": "running",
+                "active_agent": active_agent,
+                "agent_label": agent_label,
+                "step_label": step_label,
             },
         )
 

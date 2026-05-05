@@ -28,6 +28,8 @@ interface SessionState {
   task: Task | null
   status: SessionStatus
   currentStep: string
+  activeAgent: string
+  progressMessage: string
   progress: number
   doc: Document | null
   slides: Slide | null
@@ -42,6 +44,8 @@ interface SessionState {
   setTask: (task: Task | null) => void
   setStatus: (status: SessionState['status']) => void
   setCurrentStep: (step: string) => void
+  setActiveAgent: (agent: string) => void
+  setProgressMessage: (message: string) => void
   setProgress: (progress: number) => void
   setDoc: (doc: Document | null) => void
   setSlides: (slides: Slide | null) => void
@@ -85,6 +89,8 @@ const baseInitialState = {
   task: null,
   status: 'idle' as const,
   currentStep: '',
+  activeAgent: '',
+  progressMessage: '',
   progress: 0,
   doc: null,
   slides: null,
@@ -154,6 +160,8 @@ export const useSessionStore = create<SessionState>((set) => ({
             ? 'running'
             : 'connected') as SessionState['status'],
       currentStep: snapshot.task?.current_step || '',
+      activeAgent: snapshot.task?.result_json?.active_agent || '',
+      progressMessage: '',
       progress: snapshot.task?.progress || 0,
       doc: snapshot.doc,
       slides: snapshot.slides,
@@ -185,6 +193,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   setCurrentStep: (step) => {
     persistState({ currentStep: step })
     set({ currentStep: step })
+  },
+  setActiveAgent: (agent) => {
+    persistState({ activeAgent: agent })
+    set({ activeAgent: agent })
+  },
+  setProgressMessage: (message) => {
+    persistState({ progressMessage: message })
+    set({ progressMessage: message })
   },
   setProgress: (progress) => {
     persistState({ progress })

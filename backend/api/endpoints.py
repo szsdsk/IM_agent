@@ -589,6 +589,26 @@ def _looks_like_feedback(content: str) -> bool:
     )
 
 
+def _looks_like_modification_request_command(content: str) -> bool:
+    """识别“需要修改”这类只是在打开反馈入口的短指令。"""
+    text = re.sub(r"[\s，。,.!！?？：:；;、]+", "", (content or "").lower())
+    if not text or _has_slide_reference(text):
+        return False
+    commands = {
+        "需要修改",
+        "我要修改",
+        "想修改",
+        "修改一下",
+        "要修改",
+        "需要调整",
+        "我要调整",
+        "调整一下",
+    }
+    if text in commands:
+        return True
+    return len(text) <= 8 and any(marker in text for marker in ("需要修改", "我要修改", "修改一下", "需要调整"))
+
+
 def _room_can_mutate_task(task: Task, room_id: Optional[str]) -> bool:
     """限制飞书侧跨群修改任务；网页本地请求不带 room_id 时保持兼容。"""
     if not room_id:
@@ -613,6 +633,62 @@ def _task_matches_pending_lark_feedback(task: Task, room_id: Optional[str], user
 
     requested_by = pending.get("user_id")
     return not requested_by or not user_id or requested_by == user_id
+
+
+async def _find_latest_mutable_feedback_task(
+    db: AsyncSession,
+    session_id: str,
+    room_id: Optional[str],
+) -> Optional[Task]:
+    result = await db.execute(
+        select(Task)
+        .where(Task.session_id == session_id)
+        .order_by(Task.updated_at.desc(), Task.created_at.desc())
+    )
+    for task in result.scalars().all():
+        if task.status not in {"completed", "pending"}:
+            continue
+        if _task_delivery_confirmed(task):
+            continue
+        if not _room_can_mutate_task(task, room_id):
+            continue
+        if _extract_result_payload(task):
+            return task
+    return None
+
+
+async def _mark_task_waiting_for_lark_feedback(
+    db: AsyncSession,
+    task: Task,
+    room_id: Optional[str],
+    user_id: Optional[str],
+) -> None:
+    result_json = dict(task.result_json) if isinstance(task.result_json, dict) else {}
+    result_json["pending_feedback"] = {
+        "chat_id": room_id,
+        "user_id": user_id,
+        "requested_at": datetime.utcnow().isoformat(),
+    }
+    result_json["im_provider"] = result_json.get("im_provider") or "lark"
+    result_json["chat_id"] = result_json.get("chat_id") or room_id
+    task.status = "pending"
+    task.current_step = "confirm_or_modify"
+    task.result_json = result_json
+    task.updated_at = datetime.utcnow()
+    await db.commit()
+    await sync_service.publish(
+        event_type=EventType.TASK_PROGRESS,
+        session_id=task.session_id,
+        task_id=task.id,
+        user_id=user_id,
+        device_type="bot",
+        data={
+            "step": "confirm_or_modify",
+            "progress": task.progress,
+            "status": "running",
+            "message": "等待飞书侧修改意见",
+        },
+    )
 
 
 async def _sync_lark_doc_edit(
@@ -894,6 +970,29 @@ async def _run_lark_message_task(message: Dict[str, Any]) -> None:
             await db.commit()
             await db.refresh(session)
         context_messages = await _build_short_term_memory(db, session.id)
+
+        if _looks_like_modification_request_command(text):
+            feedback_task = await _find_latest_mutable_feedback_task(
+                db,
+                session_id=session.id,
+                room_id=message.get("chat_id"),
+            )
+            if not feedback_task:
+                if message.get("chat_id") and lark_bot_service.is_configured:
+                    await lark_bot_service.send_text(message["chat_id"], "没有找到可修改的上一轮任务，请先生成一份内容。")
+                return
+            await _mark_task_waiting_for_lark_feedback(
+                db,
+                feedback_task,
+                room_id=message.get("chat_id"),
+                user_id=message.get("user_id"),
+            )
+            if message.get("chat_id") and lark_bot_service.is_configured:
+                await lark_bot_service.send_text(
+                    message["chat_id"],
+                    f"任务 {feedback_task.id} 已进入修改模式，请直接发送修改意见，例如：第 2 页加上英雄克制关系。",
+                )
+            return
 
         feedback_target = await _find_feedback_target(
             db=db,

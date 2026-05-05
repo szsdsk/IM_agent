@@ -16,7 +16,13 @@ from backend.services.lark_bot_service import (
     lark_bot_service,
 )
 from backend.services.llm_service import revise_deck_spec, revise_doc_content
-from backend.services.llm_service import generate_qa, generate_rehearsal, revise_targeted_slides, summarize_im_context
+from backend.services.llm_service import (
+    format_im_context_for_prompt,
+    generate_qa,
+    generate_rehearsal,
+    revise_targeted_slides,
+    summarize_im_context,
+)
 from backend.services.rocket_chat_service import (
     fetch_im_context,
     post_delivery_to_im,
@@ -40,6 +46,47 @@ STEP_PROGRESS = {
     "prepare_delivery": 0.83,
     "confirm_or_modify": 0.88,
     "deliver_result": 1.0,
+}
+
+AGENT_LABELS = {
+    "pilot_agent": "Pilot Agent",
+    "planner_agent": "Planner Agent",
+    "im_context_agent": "IM Context Agent",
+    "doc_agent": "Doc Agent",
+    "canvas_agent": "Canvas Agent",
+    "deck_agent": "Deck Agent",
+    "ppt_agent": "PPT Agent",
+    "rehearsal_agent": "Rehearsal Agent",
+    "delivery_agent": "Delivery Agent",
+    "sync_agent": "Sync Agent",
+}
+
+STEP_AGENT_MAP = {
+    "receive_input": "pilot_agent",
+    "parse_intent": "pilot_agent",
+    "plan_workflow": "planner_agent",
+    "extract_tasks": "planner_agent",
+    "generate_doc": "doc_agent",
+    "generate_canvas": "canvas_agent",
+    "generate_slides": "deck_agent",
+    "generate_rehearsal": "rehearsal_agent",
+    "prepare_delivery": "delivery_agent",
+    "confirm_or_modify": "pilot_agent",
+    "deliver_result": "delivery_agent",
+}
+
+STEP_ACTION_LABELS = {
+    "receive_input": "已接收 IM 指令",
+    "parse_intent": "正在理解用户意图",
+    "plan_workflow": "正在拆解任务并编排流程",
+    "extract_tasks": "正在生成可执行任务清单",
+    "generate_doc": "正在生成发布评审文档",
+    "generate_canvas": "正在生成流程图画布",
+    "generate_slides": "正在生成管理层汇报 PPT",
+    "generate_rehearsal": "正在准备讲稿与 Q&A",
+    "prepare_delivery": "正在归档并准备回传飞书",
+    "confirm_or_modify": "等待确认或修改意见",
+    "deliver_result": "正在交付结果",
 }
 
 
@@ -485,6 +532,40 @@ class AgentOrchestrator:
             "completed_at": datetime.utcnow().isoformat(),
         }
 
+    @staticmethod
+    def _progress_agent(state: AgentState) -> str:
+        active_agent = state.get("active_agent")
+        if active_agent:
+            return str(active_agent)
+        return STEP_AGENT_MAP.get(str(state.get("current_step") or ""), "pilot_agent")
+
+    @staticmethod
+    def _progress_action(state: AgentState, agent: str) -> str:
+        step = str(state.get("current_step") or "")
+        if agent == "im_context_agent":
+            return "正在提取群聊关键信息"
+        if agent == "ppt_agent":
+            return "正在优化并渲染专业 PPT"
+        return STEP_ACTION_LABELS.get(step, f"正在执行 {step}" if step else "正在执行任务")
+
+    def _progress_payload(self, task_id: str, state: AgentState) -> Dict[str, Any]:
+        agent = self._progress_agent(state)
+        agent_label = AGENT_LABELS.get(agent, agent)
+        action_label = self._progress_action(state, agent)
+        return {
+            "type": "task.progress",
+            "task_id": task_id,
+            "step": state.get("current_step"),
+            "message": f"{agent_label}：{action_label}",
+            "progress": state.get("progress"),
+            "status": state.get("status"),
+            "active_agent": agent,
+            "agent_label": agent_label,
+            "step_label": action_label,
+            "timestamp": state.get("updated_at"),
+            "updated_at": state.get("updated_at"),
+        }
+
     def _next_step_after(self, node_name: str, state: AgentState) -> Optional[str]:
         """预测下一节点，用于长耗时节点开始前先刷新前端状态。"""
         if node_name == "receive_input":
@@ -512,27 +593,22 @@ class AgentOrchestrator:
         ws_sender: Callable = None,
     ) -> None:
         """只给前端和同步通道发送“下一步已开始”，避免 IM 端被刷屏。"""
-        progress_message = {
-            "type": "task.progress",
-            "task_id": task_id,
-            "step": state.get("current_step"),
-            "message": f"Executing: {state.get('current_step')}",
-            "progress": state.get("progress"),
-            "status": state.get("status"),
-            "timestamp": state.get("updated_at"),
-            "updated_at": state.get("updated_at"),
-        }
+        progress_message = self._progress_payload(task_id, state)
         if ws_sender:
             await ws_sender(progress_message)
         await self.trigger_callback("progress", progress_message)
 
         try:
+            agent = progress_message.get("active_agent")
             await sync_service.broadcast_task_progress(
                 session_id=state.get("session_id", ""),
                 task_id=task_id,
                 step=state.get("current_step", ""),
                 progress=state.get("progress", 0),
-                message=f"Executing: {state.get('current_step')}",
+                message=progress_message["message"],
+                active_agent=agent,
+                agent_label=progress_message.get("agent_label"),
+                step_label=progress_message.get("step_label"),
             )
         except Exception:
             pass
@@ -544,16 +620,7 @@ class AgentOrchestrator:
         state: AgentState,
         ws_sender: Callable = None,
     ) -> None:
-        progress_message = {
-            "type": "task.progress",
-            "task_id": task_id,
-            "step": state.get("current_step"),
-            "message": f"Executing: {state.get('current_step')}",
-            "progress": state.get("progress"),
-            "status": state.get("status"),
-            "timestamp": state.get("updated_at"),
-            "updated_at": state.get("updated_at"),
-        }
+        progress_message = self._progress_payload(task_id, state)
         if ws_sender:
             await ws_sender(progress_message)
         await self.trigger_callback("progress", progress_message)
@@ -566,7 +633,10 @@ class AgentOrchestrator:
                 task_id=task_id,
                 step=state.get("current_step", ""),
                 progress=state.get("progress", 0),
-                message=f"Executing: {state.get('current_step')}",
+                message=progress_message["message"],
+                active_agent=progress_message.get("active_agent"),
+                agent_label=progress_message.get("agent_label"),
+                step_label=progress_message.get("step_label"),
             )
         except Exception:
             pass
@@ -587,7 +657,7 @@ class AgentOrchestrator:
                     text = (
                         "Agent-Pilot 任务进行中\n"
                         f"进度: {int(float(state.get('progress', 0)) * 100)}%\n"
-                        f"步骤: {state.get('current_step')}\n"
+                        f"当前: {self._progress_payload(task_id, state)['message']}\n"
                         f"任务: {task_id}"
                     )
                     text_result = await lark_bot_service.send_text(room_id, text)
@@ -602,7 +672,7 @@ class AgentOrchestrator:
                 task_id=task_id,
                 step=state.get("current_step"),
                 progress=state.get("progress", 0),
-                message=f"Executing: {state.get('current_step')}",
+                message=self._progress_payload(task_id, state)["message"],
             )
 
             if state.get("current_step") == "plan_workflow" and state.get("workflow_plan"):

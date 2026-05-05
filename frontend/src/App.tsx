@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import DocViewer from './components/DocViewer'
 import SlideViewer from './components/SlideViewer'
 import CanvasViewer from './components/CanvasViewer'
+import SyncQRCode from './components/SyncQRCode'
 import VoiceTranscriber from './components/VoiceTranscriber'
 import { api } from './services/api'
 import { wsService } from './services/websocket'
@@ -54,6 +55,10 @@ function formatConversationTime(value: string): string {
 export default function App() {
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null)
   const [shareCopied, setShareCopied] = useState(false)
+  const [qrOpen, setQrOpen] = useState(false)
+  const [syncUrl, setSyncUrl] = useState('')
+  const [syncUrlLoading, setSyncUrlLoading] = useState(false)
+  const [syncUrlError, setSyncUrlError] = useState<string | null>(null)
   const [creatingConversation, setCreatingConversation] = useState(false)
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactPanel>(null)
   const [conversationHistory, setConversationHistory] = useState<ConversationHistoryItem[]>(() => loadConversationHistory())
@@ -163,6 +168,14 @@ export default function App() {
     if (selectedArtifact === 'canvas' && !canvas) setSelectedArtifact(null)
   }, [canvas, doc, selectedArtifact, slides])
 
+  useEffect(() => {
+    if (!sessionId) {
+      setQrOpen(false)
+      setSyncUrl('')
+      setSyncUrlError(null)
+    }
+  }, [sessionId])
+
   const startNewConversation = async () => {
     if (creatingConversation) return
     setCreatingConversation(true)
@@ -254,8 +267,8 @@ export default function App() {
     }
   }
 
-  const copySyncLink = async () => {
-    if (!sessionId) return
+  const buildSyncLink = async () => {
+    if (!sessionId) return ''
     const url = new URL(window.location.href)
     url.searchParams.set('session_id', sessionId)
     if (['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(url.hostname)) {
@@ -268,9 +281,37 @@ export default function App() {
         // Keep the current host if LAN IP detection fails.
       }
     }
-    await navigator.clipboard.writeText(url.toString())
+    return url.toString()
+  }
+
+  const copySyncLink = async () => {
+    const link = await buildSyncLink()
+    if (!link) return
+    await navigator.clipboard.writeText(link)
+    setSyncUrl(link)
     setShareCopied(true)
     window.setTimeout(() => setShareCopied(false), 1500)
+  }
+
+  const openSyncQr = async () => {
+    if (!sessionId) return
+    if (qrOpen) {
+      setQrOpen(false)
+      return
+    }
+
+    setQrOpen(true)
+    setSyncUrlLoading(true)
+    setSyncUrlError(null)
+    try {
+      const link = await buildSyncLink()
+      setSyncUrl(link)
+    } catch (error) {
+      console.error('Failed to create sync QR code:', error)
+      setSyncUrlError('二维码生成失败')
+    } finally {
+      setSyncUrlLoading(false)
+    }
   }
 
   const renderArtifactPanel = () => {
@@ -393,12 +434,48 @@ export default function App() {
             )}
 
             {sessionId && (
-              <button
-                onClick={copySyncLink}
-                className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-              >
-                {shareCopied ? '已复制' : '复制链接'}
-              </button>
+              <>
+                <button
+                  onClick={copySyncLink}
+                  className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                >
+                  {shareCopied ? '已复制' : '复制链接'}
+                </button>
+                <div className="relative">
+                  <button
+                    aria-expanded={qrOpen}
+                    onClick={openSyncQr}
+                    className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                  >
+                    二维码
+                  </button>
+                  {qrOpen && (
+                    <div className="absolute right-0 top-full z-40 mt-2 w-64 rounded-md border border-gray-200 bg-white p-3 shadow-xl">
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-sm font-medium text-gray-900">扫描二维码</p>
+                        <button
+                          onClick={() => setQrOpen(false)}
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="flex min-h-[200px] items-center justify-center rounded-md bg-white p-2 text-gray-900">
+                        {syncUrlLoading ? (
+                          <span className="text-xs text-gray-400">生成中...</span>
+                        ) : syncUrlError ? (
+                          <span className="text-xs text-red-500">{syncUrlError}</span>
+                        ) : (
+                          <SyncQRCode className="text-gray-900" value={syncUrl} />
+                        )}
+                      </div>
+                      <p className="mt-2 break-all rounded bg-gray-50 px-2 py-1 text-[11px] leading-4 text-gray-500">
+                        {syncUrl || '同步链接'}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
         </header>

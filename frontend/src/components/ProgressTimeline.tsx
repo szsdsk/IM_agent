@@ -6,18 +6,17 @@ interface ProgressTimelineProps {
 }
 
 const steps = [
-  { key: 'receive_input', name: '接收输入', icon: '1' },
-  { key: 'parse_intent', name: '分析需求', icon: '2' },
-  { key: 'plan_workflow', name: '规划流程', icon: '3' },
-  { key: 'extract_tasks', name: '提取任务', icon: '4' },
-  { key: 'generate_doc', name: '生成文档', icon: '5' },
-  // 后端会在需要结构图时推送 generate_canvas，前端要把它纳入时间线。
-  { key: 'generate_canvas', name: '生成画布', icon: '6' },
-  { key: 'generate_slides', name: '生成 PPT', icon: '7' },
-  { key: 'generate_rehearsal', name: '生成讲稿', icon: '8' },
-  { key: 'prepare_delivery', name: '准备交付', icon: '9' },
-  { key: 'confirm_or_modify', name: '确认修改', icon: '10' },
-  { key: 'deliver_result', name: '交付结果', icon: '11' },
+  { key: 'receive_input', agent: 'Pilot Agent', action: '接收 IM 指令', icon: '1' },
+  { key: 'parse_intent', agent: 'Pilot Agent', action: '理解用户意图', icon: '2' },
+  { key: 'plan_workflow', agent: 'Planner Agent', action: '拆解任务并编排流程', icon: '3' },
+  { key: 'extract_tasks', agent: 'Planner Agent', action: '生成可执行任务清单', icon: '4' },
+  { key: 'generate_doc', agent: 'Doc Agent', action: '生成发布评审文档', icon: '5' },
+  { key: 'generate_canvas', agent: 'Canvas Agent', action: '生成流程图画布', icon: '6' },
+  { key: 'generate_slides', agent: 'Deck Agent', action: '生成管理层汇报 PPT', icon: '7' },
+  { key: 'generate_rehearsal', agent: 'Rehearsal Agent', action: '准备讲稿与 Q&A', icon: '8' },
+  { key: 'prepare_delivery', agent: 'Delivery Agent', action: '归档并准备回传飞书', icon: '9' },
+  { key: 'confirm_or_modify', agent: 'Pilot Agent', action: '等待确认或修改意见', icon: '10' },
+  { key: 'deliver_result', agent: 'Delivery Agent', action: '交付结果', icon: '11' },
 ]
 
 type StepStatus = 'completed' | 'active' | 'pending' | 'failed'
@@ -78,8 +77,9 @@ export default function ProgressTimeline({ className = '' }: ProgressTimelinePro
                     stepStatus === 'failed' && 'text-red-600'
                   )}
                 >
-                  {step.name}
+                  {step.agent}
                 </div>
+                <div className="mt-0.5 text-xs text-gray-500">{step.action}</div>
               </div>
             </div>
           )
