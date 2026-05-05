@@ -18,6 +18,7 @@ function createClientId(): string {
 
 function detectDeviceType(): 'desktop' | 'mobile' {
   if (typeof window === 'undefined') return 'desktop'
+  if ((window as any).electronInfo?.isElectron) return 'desktop'
   return window.matchMedia('(max-width: 768px)').matches ? 'mobile' : 'desktop'
 }
 
@@ -141,7 +142,7 @@ if (Array.isArray(initialState.messages)) {
   initialState.messages = mergeMessages(initialState.messages)
 }
 
-export const useSessionStore = create<SessionState>((set) => ({
+export const useSessionStore = create<SessionState>((set, get) => ({
   ...initialState,
 
   setSessionId: (id) => {
@@ -149,16 +150,26 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ sessionId: id })
   },
   hydrateSnapshot: (snapshot) => {
+    const currentStatus = get().status
+    const taskStatus = snapshot.task?.status
+    const newStatus = (taskStatus === 'completed'
+      ? 'completed'
+      : taskStatus === 'failed'
+        ? 'failed'
+        : taskStatus === 'awaiting_clarification'
+          ? 'awaiting_clarification'
+          : snapshot.task
+            ? 'running'
+            : 'connected') as SessionState['status']
+    // 不降级：如果当前已经是 completed/failed，快照返回旧状态时不回退到 running
+    const status = (currentStatus === 'completed' || currentStatus === 'failed')
+      ? currentStatus
+      : newStatus
+
     const next = {
       sessionId: snapshot.session.id,
       task: snapshot.task,
-      status: (snapshot.task?.status === 'completed'
-        ? 'completed'
-        : snapshot.task?.status === 'failed'
-          ? 'failed'
-          : snapshot.task
-            ? 'running'
-            : 'connected') as SessionState['status'],
+      status,
       currentStep: snapshot.task?.current_step || '',
       activeAgent: snapshot.task?.result_json?.active_agent || '',
       progressMessage: '',
@@ -184,7 +195,15 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
   setTask: (task) => {
     persistState({ task })
-    set({ task })
+    const updates: Partial<SessionState> = { task }
+    if (task) {
+      // 同步 task 状态到顶层 status，确保前端展示正确
+      const taskStatus = task.status as string
+      if (taskStatus === 'completed' || taskStatus === 'failed' || taskStatus === 'awaiting_clarification') {
+        updates.status = taskStatus as SessionState['status']
+      }
+    }
+    set(updates as SessionState)
   },
   setStatus: (status) => {
     persistState({ status })

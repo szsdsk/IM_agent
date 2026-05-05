@@ -865,6 +865,21 @@ SYSTEM_PROMPTS = {
 3. 识别目标受众和汇报场景
 4. 识别特殊约束或要求
 
+关键要求：只有当用户输入明显缺少核心信息时，才生成澄清问题。核心信息指：没有说
+明主题、用途或内容方向。不要因为缺少受众、风格等次要信息而提问——这些有合理的
+默认值。
+
+判断模糊的标准（必须满足至少一条才生成 questions）：
+- 只说了"做个PPT"/"生成文档"/"画个流程图"但没有说明任何主题或用途
+- 说"做个方案"但没有具体方向
+- 说"总结一下"但没有说明总结的范围
+
+如果用户已经说明了主题（例如"做一个关于XX的PPT"），就不要生成澄清问题。此时
+应将 audience 设为合理的默认值（如"管理层"或"团队"）。
+
+在以上情况下，请在 questions 中返回 2-3 个具体问题，同时把 content_types 设为根
+据需求推测的最可能的类型。
+
 请输出结构化结果，content_types 只能使用 doc、slides、canvas、summary 等短标识。""",
 
     "planner": """你是一个工作流规划助手。根据用户需求和上下文制定执行计划。
@@ -962,10 +977,24 @@ SYSTEM_PROMPTS = {
 }
 
 SYSTEM_PROMPTS["im_context_summarizer"] = (
-    "You are an IM context analysis agent for a multi-agent office assistant. "
-    "Extract structured, reusable context from chat history and the current request. "
-    "Focus on business background, stakeholder opinions, decisions, requirements, risks, todos, and open questions. "
-    "Return concise structured data that downstream document, canvas, and deck agents can use."
+    "You are an IM context analysis agent that extracts structured, reusable context from "
+    "Chinese-language chat history. The input contains session messages and task summaries.\n\n"
+    "Extract the following fields from the conversation:\n"
+    "- summary: 1-2 sentence Chinese summary of the overall discussion\n"
+    "- topics: key topics discussed (in Chinese, 3-8 items)\n"
+    "- decisions: concrete decisions already made (e.g. '采用方案A', '下周上线')\n"
+    "- requirements: explicit requirements or feature requests mentioned\n"
+    "- risks: risks or concerns raised by any participant\n"
+    "- todos: action items with owner if mentioned (e.g. '张三负责整理数据')\n"
+    "- stakeholders: people or roles mentioned as relevant parties\n"
+    "- open_questions: unresolved questions that still need discussion\n\n"
+    "Guidelines:\n"
+    "- Prefer extracting explicitly stated information over inference\n"
+    "- If the chat only contains previous task summaries (not actual discussion), "
+    "set summary to the task intent and extract key points from the summary\n"
+    "- For single-message inputs without context, focus on the request itself\n"
+    "- Output must be concise — each item should be under 100 characters\n"
+    "- Use Chinese for all extracted content"
 )
 
 SYSTEM_PROMPTS["doc_reviser"] = (

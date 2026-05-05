@@ -117,6 +117,9 @@ class WebSocketService {
       }
 
       case 'task.progress': {
+        // 已完成/失败后忽略进度事件，防止乱序消息重置页面状态
+        if (store.status === 'completed' || store.status === 'failed') break
+
         const payload = this.payload(data)
         const step = data.step ?? payload.step
         const progress = data.progress ?? payload.progress
@@ -327,12 +330,13 @@ class WebSocketService {
     }
   }
 
-  sendMessage(content: string, presentationScene?: string, feedbackTaskId?: string): void {
+  sendMessage(content: string, presentationScene?: string, feedbackTaskId?: string, scene?: string): void {
     this.send({
       type: 'message',
       content,
       presentation_scene: presentationScene,
       feedback_task_id: feedbackTaskId,
+      scene,
     })
   }
 

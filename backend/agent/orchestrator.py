@@ -95,6 +95,11 @@ class AgentOrchestrator:
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
         self._tools = ToolFactory.get_all_langchain_tools()
         self._workflow = self._build_workflow()
+        # 任务状态内存缓存，用于在 DB 持久化前向前端提供正确状态
+        self._task_status_cache: Dict[str, str] = {}
+
+    def get_cached_task_status(self, task_id: str) -> Optional[str]:
+        return self._task_status_cache.get(task_id)
 
     def _build_workflow(self):
         """构建 LangGraph 条件工作流。"""
@@ -237,11 +242,18 @@ class AgentOrchestrator:
         current_state: AgentState = state
         try:
             current_state = await self._run_plan_and_execute(current_state, room_id, task_id, ws_sender)
+            # 等待用户澄清时不广播完成消息
+            if current_state.get("waiting_for_clarification"):
+                return current_state
         except Exception as exc:
             logger.exception("Plan-and-Execute workflow failed for task %s", task_id)
             current_state["error"] = str(exc)
             current_state["status"] = "failed"
             current_state["updated_at"] = datetime.utcnow().isoformat()
+
+        # 在广播完成前缓存最终状态，确保快照接口能立即返回正确状态
+        self._task_status_cache[task_id] = current_state.get("status", "completed")
+        self._task_status_cache = {k: v for k, v in list(self._task_status_cache.items())[-100:]}
 
         completed_message = {
             "type": "task.completed" if current_state.get("status") == "completed" else "task.failed",
@@ -276,6 +288,195 @@ class AgentOrchestrator:
 
         return current_state
 
+    async def handle_clarification_response(
+        self,
+        session_id: str,
+        task_id: str,
+        original_intent: str,
+        clarification: str,
+        room_id: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, Any]]] = None,
+        ws_sender: Callable = None,
+    ) -> AgentState:
+        """Handle user's answer to clarification questions and resume the workflow."""
+        combined_intent = f"{original_intent}\n\n补充信息：{clarification}"
+        state = create_initial_state(
+            session_id,
+            task_id,
+            combined_intent,
+            room_id=room_id,
+            context_messages=list(context_messages or [])[-24:],
+        )
+        state["presentation_scene"] = None
+        state["waiting_for_clarification"] = False
+        state["pending_questions"] = []
+        state["status"] = "running"
+        state["progress"] = 0.12
+
+        state = await nodes.receive_input(state)
+        state = await nodes.parse_intent(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+
+        if state.get("waiting_for_clarification"):
+            return state
+
+        # 继续执行后续工作流
+        state = await nodes.plan_workflow(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+        if state.get("error"):
+            state = await nodes.deliver_result(state)
+            return state
+
+        state = await nodes.extract_tasks(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+        if state.get("error"):
+            return await nodes.deliver_result(state)
+
+        state = await self._execute_agent_plan(state, room_id, task_id, ws_sender)
+        if state.get("error"):
+            state = await nodes.deliver_result(state)
+            await self._publish_progress(room_id, task_id, state, ws_sender)
+            return state
+
+        state = await nodes.confirm_or_modify(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+
+        state = await nodes.deliver_result(state)
+        await self._publish_progress(room_id, task_id, state, ws_sender)
+
+        self._task_status_cache[task_id] = state.get("status", "completed")
+        self._task_status_cache = {k: v for k, v in list(self._task_status_cache.items())[-100:]}
+
+        completed_message = {
+            "type": "task.completed" if state.get("status") == "completed" else "task.failed",
+            "task_id": task_id,
+            "result": state.get("result"),
+            "status": state.get("status"),
+            "error": state.get("error"),
+            "timestamp": state.get("updated_at"),
+            "updated_at": state.get("updated_at"),
+        }
+        if ws_sender:
+            await ws_sender(completed_message)
+        await self.trigger_callback("completed", completed_message)
+
+        try:
+            await sync_service.broadcast_task_finished(
+                session_id=session_id,
+                task_id=task_id,
+                result=state.get("result"),
+                status=state.get("status"),
+                error=state.get("error"),
+            )
+            await sync_service.broadcast_delivery(
+                session_id=session_id,
+                task_id=task_id,
+                delivery=state.get("result") or {},
+            )
+        except Exception:
+            pass
+
+        return state
+
+    async def execute_scene(
+        self,
+        session_id: str,
+        task_id: str,
+        intent: str,
+        scene: str,
+        user_id: Optional[str] = None,
+        room_id: Optional[str] = None,
+        presentation_scene: Optional[str] = None,
+        context_messages: Optional[List[Dict[str, Any]]] = None,
+        ws_sender: Callable = None,
+    ) -> AgentState:
+        """Execute a single scene (doc/canvas/slides) directly, skipping pilot nodes."""
+        merged_context_messages: List[Dict[str, Any]] = list(context_messages or [])
+        state = create_initial_state(
+            session_id,
+            task_id,
+            intent,
+            user_id=user_id,
+            room_id=room_id,
+            context_messages=merged_context_messages[-24:],
+        )
+        state["presentation_scene"] = presentation_scene
+        state["content_types"] = [scene]
+        state["status"] = "running"
+        state["current_step"] = f"generate_{scene}"
+        state["progress"] = 0.0
+
+        scene_node_map = {
+            "doc": ("generate_doc", nodes.generate_doc, 0.5),
+            "canvas": ("generate_canvas", nodes.generate_canvas, 0.6),
+            "slides": ("generate_slides", nodes.generate_slides, 0.7),
+        }
+
+        try:
+            if scene not in scene_node_map:
+                state["error"] = f"Unknown scene: {scene}"
+                state["status"] = "failed"
+                state = await nodes.deliver_result(state)
+            else:
+                step, node_fn, progress = scene_node_map[scene]
+                if scene == "slides":
+                    state["audience"] = state.get("audience") or "管理层"
+                    state["deck_spec"] = {}
+                    state["presentation_scene"] = state.get("presentation_scene") or presentation_scene
+
+                state["current_step"] = step
+                state["progress"] = progress
+                state["updated_at"] = datetime.utcnow().isoformat()
+                await self._publish_progress(room_id, task_id, state, ws_sender)
+
+                state = await node_fn(state)
+                if state.get("error"):
+                    state["status"] = "failed"
+                else:
+                    state["current_step"] = "deliver_result"
+                    state["progress"] = 1.0
+                    state["updated_at"] = datetime.utcnow().isoformat()
+                    await self._publish_progress(room_id, task_id, state, ws_sender)
+
+                state = await nodes.deliver_result(state)
+
+        except Exception as exc:
+            logger.exception("Scene %s execution failed for task %s", scene, task_id)
+            state["error"] = str(exc)
+            state["status"] = "failed"
+            state["updated_at"] = datetime.utcnow().isoformat()
+
+        completed_message = {
+            "type": "task.completed" if state.get("status") == "completed" else "task.failed",
+            "task_id": task_id,
+            "result": state.get("result"),
+            "status": state.get("status"),
+            "error": state.get("error"),
+            "timestamp": state.get("updated_at"),
+            "updated_at": state.get("updated_at"),
+        }
+        if ws_sender:
+            await ws_sender(completed_message)
+        await self.trigger_callback("completed", completed_message)
+
+        try:
+            await sync_service.broadcast_task_finished(
+                session_id=state.get("session_id", ""),
+                task_id=state["task_id"],
+                result=state.get("result"),
+                status=state.get("status"),
+                error=state.get("error"),
+            )
+            await sync_service.broadcast_delivery(
+                session_id=state.get("session_id", ""),
+                task_id=state["task_id"],
+                delivery=state.get("result") or {},
+            )
+        except Exception:
+            pass
+
+        return state
+
     async def _run_plan_and_execute(
         self,
         state: AgentState,
@@ -294,6 +495,9 @@ class AgentOrchestrator:
             await self._publish_progress(room_id, task_id, state, ws_sender)
             if state.get("error"):
                 return await nodes.deliver_result(state)
+            # 需要澄清时暂停工作流，等待用户回答
+            if state.get("waiting_for_clarification"):
+                return state
 
         state = await self._execute_agent_plan(state, room_id, task_id, ws_sender)
         if state.get("error"):
@@ -609,6 +813,7 @@ class AgentOrchestrator:
                 active_agent=agent,
                 agent_label=progress_message.get("agent_label"),
                 step_label=progress_message.get("step_label"),
+                status=state.get("status", "running"),
             )
         except Exception:
             pass
@@ -637,6 +842,7 @@ class AgentOrchestrator:
                 active_agent=progress_message.get("active_agent"),
                 agent_label=progress_message.get("agent_label"),
                 step_label=progress_message.get("step_label"),
+                status=state.get("status", "running"),
             )
         except Exception:
             pass

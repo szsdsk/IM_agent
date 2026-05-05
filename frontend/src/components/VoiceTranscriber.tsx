@@ -3,6 +3,7 @@ import { api } from '../services/api'
 import { wsService } from '../services/websocket'
 import { useSessionStore } from '../store/useSessionStore'
 import type { Message, PresentationScene } from '../types'
+import MarkdownRenderer from './MarkdownRenderer'
 
 const STEP_LABELS: Record<string, string> = {
   receive_input: 'Pilot Agent：已接收 IM 指令',
@@ -381,7 +382,7 @@ export default function VoiceTranscriber() {
                             : 'rounded-bl-md border border-gray-200 bg-white text-gray-800'
                       }`}
                     >
-                      {message.content}
+                      <MarkdownRenderer content={message.content} />
                     </div>
                     <span className="px-1 text-[11px] text-gray-400">{messageTime(message)}</span>
                   </div>

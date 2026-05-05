@@ -51,7 +51,8 @@ export const api = {
     presentationScene?: PresentationScene,
     feedbackTaskId?: string,
     clientId?: string,
-    deviceType?: string
+    deviceType?: string,
+    scene?: string
   ): Promise<Task> {
     return fetchAPI<Task>(`/sessions/${sessionId}/messages`, {
       method: 'POST',
@@ -62,6 +63,7 @@ export const api = {
         feedback_task_id: feedbackTaskId,
         client_id: clientId,
         device_type: deviceType,
+        scene,
       }),
     })
   },

@@ -6,12 +6,13 @@ export type SessionStatus =
   | 'completed'
   | 'failed'
   | 'error'
+  | 'awaiting_clarification'
 
 export interface Task {
   id: string
   session_id: string
   intent: string
-  status: 'pending' | 'running' | 'waiting' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'awaiting_clarification'
   current_step: string
   progress: number
   result_json: Record<string, any> | null

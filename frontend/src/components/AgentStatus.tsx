@@ -43,6 +43,8 @@ export default function AgentStatus({ className = '' }: AgentStatusProps) {
       case 'failed':
       case 'error':
         return 'text-red-500'
+      case 'awaiting_clarification':
+        return 'text-amber-500'
       default:
         return 'text-gray-500'
     }
@@ -64,6 +66,8 @@ export default function AgentStatus({ className = '' }: AgentStatusProps) {
         return '执行失败'
       case 'error':
         return '错误'
+      case 'awaiting_clarification':
+        return '等待澄清'
       default:
         return '未知'
     }

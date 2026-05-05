@@ -1,6 +1,7 @@
 node_modules/
 .venv/
 .trae/
+.claude/
 data/
 
 temp/
@@ -13,6 +14,7 @@ temp/
 *.egg-info/
 dist/
 build/
+frontend-electron/
 
 # Environment
 .env
@@ -28,3 +30,7 @@ build/
 
 # frontend
 **/dist/
+*.pdf
+
+handover*.md
+*.txt

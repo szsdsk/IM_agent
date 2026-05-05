@@ -26,6 +26,7 @@ class SendMessageRequest(BaseModel):
     presentation_scene: Optional[str] = None
     client_id: Optional[str] = None
     device_type: Optional[str] = None
+    scene: Optional[str] = Field(default=None, description="独立场景: doc, canvas, slides")
 
 
 class MessageResponse(BaseModel):

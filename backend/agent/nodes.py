@@ -22,6 +22,7 @@ from backend.services.llm_service import (
 )
 from backend.services.delivery_service import archive_task
 from backend.services.affine_service import affine_service
+from backend.services.sync_service import EventType, sync_service
 from backend.tools.tool_factory import ToolFactory
 
 logger = logging.getLogger(__name__)
@@ -111,11 +112,9 @@ def _normalize_content_types_for_intent(content_types: Any, intent: str) -> list
     if wants_canvas and "canvas" not in normalized:
         normalized.append("canvas")
 
-    # A common IM request is "make a PPT about X"; the planner sometimes adds
-    # a document as an intermediate artifact. Treat it as source material only
-    # unless the user explicitly asked for a separate document/report.
-    if wants_deck and not wants_doc:
-        normalized = [item for item in normalized if item != "doc"]
+    # 当用户要求生成 PPT 时，保留文档作为内容素材来源，形成完整的 doc→slides 工作流。
+    if wants_deck and not wants_doc and "slides" in normalized and "doc" not in normalized:
+        normalized.insert(0, "doc")
 
     if normalized:
         return normalized
@@ -439,11 +438,28 @@ async def parse_intent(state: AgentState) -> AgentState:
         )
         if state.get("presentation_scene"):
             analysis_text += f"- 演示场景: {state['presentation_scene']}\n"
-        if intent_result.get("questions"):
-            analysis_text += f"\n需要确认: {', '.join(intent_result['questions'])}"
-            state["pending_questions"] = intent_result["questions"]
+        questions = intent_result.get("questions", [])
+        if questions:
+            question_list = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
+            analysis_text += f"\n\n需要确认以下信息：\n{question_list}"
+            state["pending_questions"] = questions
+            state["waiting_for_clarification"] = True
+            state["status"] = "awaiting_clarification"
 
         _append_message(state, "assistant", analysis_text, "parse_intent")
+
+        # 需要澄清时立即广播分析消息，让前端能看到问题
+        if state.get("waiting_for_clarification"):
+            try:
+                await sync_service.publish(
+                    event_type=EventType.MESSAGE_CREATED,
+                    session_id=state.get("session_id", ""),
+                    task_id=state.get("task_id"),
+                    data={"role": "assistant", "content": analysis_text},
+                    persist=False,
+                )
+            except Exception:
+                pass
     except Exception as exc:
         logger.exception("Error in parse_intent")
         _append_message(state, "assistant", f"分析出错: {str(exc)}", "parse_intent")
@@ -683,6 +699,21 @@ async def generate_slides(state: AgentState) -> AgentState:
             audience=audience,
             presentation_scene=presentation_scene,
         )
+        # 在 LLM 调用完成后立即广播进度，避免前端长时间无响应
+        try:
+            await sync_service.broadcast_task_progress(
+                session_id=state.get("session_id", ""),
+                task_id=state["task_id"],
+                step="generate_slides",
+                progress=0.72,
+                message="Deck Agent：PPT 结构已生成，正在渲染文件...",
+                active_agent="deck_agent",
+                agent_label="Deck Agent",
+                step_label="正在渲染 PPT 文件",
+            )
+        except Exception:
+            pass
+
         metadata = dict(deck_spec.get("metadata", {}))
         metadata.setdefault("feedback_history", [])
         metadata.setdefault("versions", [])
@@ -694,6 +725,21 @@ async def generate_slides(state: AgentState) -> AgentState:
             _normalize_slide_for_frontend(slide, index)
             for index, slide in enumerate(raw_slides)
         ]
+
+        # 渲染前广播进度，避免渲染阶段前端卡住
+        try:
+            await sync_service.broadcast_task_progress(
+                session_id=state.get("session_id", ""),
+                task_id=state["task_id"],
+                step="generate_slides",
+                progress=0.75,
+                message="Deck Agent：正在渲染 PPT 文件...",
+                active_agent="deck_agent",
+                agent_label="Deck Agent",
+                step_label="正在渲染 PPT 文件",
+            )
+        except Exception:
+            pass
 
         result = await ToolFactory.invoke_tool(
             "PPTTool",

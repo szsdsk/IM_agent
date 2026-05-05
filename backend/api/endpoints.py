@@ -219,6 +219,16 @@ def _task_to_dict(task: Task) -> Dict[str, Any]:
     }
 
 
+def _task_with_cached_status(task_dict: Dict[str, Any], task_id: str) -> Dict[str, Any]:
+    """用 orchestrator 的内存缓存覆盖任务状态，解决 DB 尚未持久化时的状态不一致。"""
+    from backend.agent.orchestrator import agent_orchestrator
+    cached = agent_orchestrator.get_cached_task_status(task_id)
+    if cached:
+        task_dict = dict(task_dict)
+        task_dict["status"] = cached
+    return task_dict
+
+
 def _document_to_dict(document: Document) -> Dict[str, Any]:
     """序列化文档产物。"""
     return {
@@ -353,6 +363,11 @@ def _task_delivery_confirmed(task: Task) -> bool:
     return isinstance(task.result_json, dict) and bool(task.result_json.get("delivery_confirmed"))
 
 
+def _task_awaiting_clarification(task: Task) -> bool:
+    """判断任务是否正在等待用户澄清。"""
+    return task.status == "awaiting_clarification"
+
+
 def _get_local_lan_ip() -> Optional[str]:
     """获取本机局域网 IP，用于前端生成手机可访问的同步链接。"""
     try:
@@ -429,7 +444,7 @@ async def _build_session_state(db: AsyncSession, session_id: str) -> Dict[str, A
             "updated_at": _iso(session.updated_at),
         },
         "tasks": [_task_to_dict(task) for task in tasks],
-        "task": _task_to_dict(latest_task) if latest_task else None,
+        "task": _task_with_cached_status(_task_to_dict(latest_task), latest_task.id) if latest_task else None,
         "documents": [_document_to_dict(document) for document in documents],
         "doc": _document_to_dict(latest_doc) if latest_doc else None,
         "slides_artifacts": [_slide_to_dict(slide) for slide in slides],
@@ -1448,6 +1463,72 @@ async def send_message(
         raise HTTPException(status_code=404, detail="Session not found")
     context_messages = await _build_short_term_memory(db, session_id)
 
+    # 如果指定了 scene，视为独立场景触发，跳过 feedback 检测。
+    if request.scene:
+        task = Task(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            intent=request.content,
+            status="pending",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        await _publish_user_message(session_id, task.id, request.content, request)
+        await sync_service.publish(
+            event_type=EventType.TASK_CREATED,
+            session_id=session_id,
+            task_id=task.id,
+            user_id=request.user_id,
+            source_client_id=request.client_id,
+            device_type=request.device_type,
+            data={"task": _task_to_dict(task)},
+        )
+        state = await agent_orchestrator.execute_scene(
+            session_id=session_id,
+            task_id=task.id,
+            intent=request.content,
+            scene=request.scene,
+            user_id=request.user_id,
+            room_id=request.room_id,
+            presentation_scene=request.presentation_scene,
+            context_messages=context_messages,
+            ws_sender=None,
+        )
+        await _persist_task_outputs(db, task, state)
+        return task
+
+    # 检查是否存在等待澄清的任务
+    latest_task_result = await db.execute(
+        select(Task)
+        .where(Task.session_id == session_id)
+        .order_by(Task.updated_at.desc())
+        .limit(1)
+    )
+    latest_task = latest_task_result.scalar_one_or_none()
+    if latest_task and _task_awaiting_clarification(latest_task):
+        await _publish_user_message(session_id, latest_task.id, request.content, request)
+        await sync_service.publish(
+            event_type=EventType.MESSAGE_CREATED,
+            session_id=session_id,
+            task_id=latest_task.id,
+            user_id=request.user_id,
+            source_client_id=request.client_id,
+            device_type=request.device_type,
+            data={"role": "user", "content": request.content},
+        )
+        state = await agent_orchestrator.handle_clarification_response(
+            session_id=session_id,
+            task_id=latest_task.id,
+            original_intent=latest_task.intent,
+            clarification=request.content,
+            room_id=request.room_id,
+            context_messages=context_messages,
+            ws_sender=None,
+        )
+        await _persist_task_outputs(db, latest_task, state)
+        return latest_task
+
     feedback_target = await _find_feedback_target(
         db=db,
         session_id=session_id,
@@ -1894,12 +1975,83 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     room_id=data.get("room_id"),
                     client_id=client_id,
                     device_type=device_type,
+                    scene=data.get("scene"),
                 )
                 async with async_session_maker() as session_result:
                     result = await session_result.execute(select(Session).where(Session.id == session_id))
                     session = result.scalar_one_or_none()
                     if session:
                         context_messages = await _build_short_term_memory(session_result, session_id)
+
+                        if request.scene:
+                            task = Task(
+                                id=str(uuid.uuid4()),
+                                session_id=session_id,
+                                intent=request.content,
+                                status="pending",
+                            )
+                            session_result.add(task)
+                            await session_result.commit()
+                            await session_result.refresh(task)
+                            await _publish_user_message(
+                                session_id, task.id, request.content, request, exclude_source=False,
+                            )
+                            await sync_service.publish(
+                                event_type=EventType.TASK_CREATED,
+                                session_id=session_id,
+                                task_id=task.id,
+                                user_id=request.user_id,
+                                source_client_id=client_id,
+                                device_type=device_type,
+                                data={"task": _task_to_dict(task)},
+                            )
+                            state = await agent_orchestrator.execute_scene(
+                                session_id=session_id,
+                                task_id=task.id,
+                                intent=request.content,
+                                scene=request.scene,
+                                user_id=request.user_id,
+                                room_id=request.room_id,
+                                presentation_scene=request.presentation_scene,
+                                context_messages=context_messages,
+                                ws_sender=websocket.send_json,
+                            )
+                            await _persist_task_outputs(session_result, task, state)
+                            continue
+
+                        # 检查是否存在等待澄清的任务
+                        latest_task_result = await session_result.execute(
+                            select(Task)
+                            .where(Task.session_id == session_id)
+                            .order_by(Task.updated_at.desc())
+                            .limit(1)
+                        )
+                        latest_task = latest_task_result.scalar_one_or_none()
+                        if latest_task and _task_awaiting_clarification(latest_task):
+                            await _publish_user_message(
+                                session_id, latest_task.id, request.content, request, exclude_source=False,
+                            )
+                            await sync_service.publish(
+                                event_type=EventType.MESSAGE_CREATED,
+                                session_id=session_id,
+                                task_id=latest_task.id,
+                                user_id=request.user_id,
+                                source_client_id=client_id,
+                                device_type=device_type,
+                                data={"role": "user", "content": request.content},
+                            )
+                            state = await agent_orchestrator.handle_clarification_response(
+                                session_id=session_id,
+                                task_id=latest_task.id,
+                                original_intent=latest_task.intent,
+                                clarification=request.content,
+                                room_id=request.room_id,
+                                context_messages=context_messages,
+                                ws_sender=websocket.send_json,
+                            )
+                            await _persist_task_outputs(session_result, latest_task, state)
+                            continue
+
                         feedback_target = await _find_feedback_target(
                             db=session_result,
                             session_id=session_id,

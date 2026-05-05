@@ -288,6 +288,7 @@ class SyncService:
         active_agent: Optional[str] = None,
         agent_label: Optional[str] = None,
         step_label: Optional[str] = None,
+        status: str = "running",
     ) -> None:
         """广播任务进度。"""
         await self.publish(
@@ -299,7 +300,7 @@ class SyncService:
                 "step": step,
                 "progress": progress,
                 "message": message,
-                "status": "running",
+                "status": status,
                 "active_agent": active_agent,
                 "agent_label": agent_label,
                 "step_label": step_label,
