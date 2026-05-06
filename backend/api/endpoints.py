@@ -40,6 +40,22 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+# 飞书消息 ID 去重缓存，防止 WebSocket 回调与 HTTP 事件回调双重处理
+_recent_lark_message_ids: Set[str] = set()
+
+
+def _check_lark_message_dedup(message_id: str) -> bool:
+    """检查飞书消息是否已处理；返回 True 表示已处理过（跳过）。"""
+    if not message_id:
+        return False
+    if message_id in _recent_lark_message_ids:
+        logger.info("Skipping duplicate lark message %s", message_id)
+        return True
+    _recent_lark_message_ids.add(message_id)
+    if len(_recent_lark_message_ids) > 500:
+        _recent_lark_message_ids.clear()
+    return False
+
 
 def _extract_lark_card_action(payload: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any], str]:
     """兼容飞书卡片回调的新旧 payload 结构，统一取出按钮 action、value 和操作者 open_id。"""
@@ -1123,7 +1139,11 @@ async def lark_event_callback(payload: Dict[str, Any], background_tasks: Backgro
 
     message = lark_bot_service.extract_message_event(payload)
     if message and message.get("chat_id") and (message.get("text") or message.get("voice_resource")):
-        background_tasks.add_task(_run_lark_message_task, message)
+        # 立即标记消息已处理，避免与 WebSocket 回调同时触发导致重复
+        if not _check_lark_message_dedup(message.get("message_id", "")):
+            background_tasks.add_task(_run_lark_message_task, message)
+        else:
+            logger.info("Dedup: lark message %s already processing, skipping event callback", message.get("message_id"))
 
     return {"code": 0, "msg": "ok"}
 
@@ -1462,6 +1482,7 @@ async def get_session_messages(session_id: str, db: AsyncSession = Depends(get_d
 async def send_message(
     session_id: str,
     request: SendMessageRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     session_result = await db.execute(select(Session).where(Session.id == session_id))
@@ -1588,20 +1609,30 @@ async def send_message(
         data={"task": _task_to_dict(task)},
     )
 
-    state = await agent_orchestrator.execute_workflow(
-        session_id=session_id,
-        task_id=task.id,
-        intent=request.content,
-        user_id=request.user_id,
-        room_id=request.room_id,
-        presentation_scene=request.presentation_scene,
-        context_messages=context_messages,
-        ws_sender=None,
-    )
+    # 后台执行工作流，不阻塞 HTTP 响应（避免飞书 Bot fetch 超时）
+    async def _background_workflow():
+        try:
+            async with async_session_maker() as bg_db:
+                state = await agent_orchestrator.execute_workflow(
+                    session_id=session_id,
+                    task_id=task.id,
+                    intent=request.content,
+                    user_id=request.user_id,
+                    room_id=request.room_id,
+                    presentation_scene=request.presentation_scene,
+                    context_messages=context_messages,
+                    ws_sender=None,
+                )
+                result = await bg_db.execute(select(Task).where(Task.id == task.id))
+                bg_task = result.scalar_one_or_none()
+                if bg_task:
+                    if request.room_id:
+                        bg_task.result_json = {"im_provider": "lark", "chat_id": request.room_id}
+                    await _persist_task_outputs(bg_db, bg_task, state)
+        except Exception as exc:
+            logger.exception("Background workflow failed for task %s", task.id)
 
-    if request.room_id:
-        task.result_json = {"im_provider": "lark", "chat_id": request.room_id}
-    await _persist_task_outputs(db, task, state)
+    background_tasks.add_task(_background_workflow)
     return task
 
 
